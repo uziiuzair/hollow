@@ -45,7 +45,7 @@ public enum ContentKind: String, CaseIterable, Codable, Sendable {
     }
 
     /// `classify` for a path already split into lowercased components.
-    static func classify(parts: [String]) -> ContentKind? {
+    public static func classify(parts: [String]) -> ContentKind? {
         guard !parts.isEmpty else { return nil }
         for rule in rules where rule.patterns.contains(where: { matches($0, parts[...]) }) {
             return rule.kind

@@ -37,6 +37,8 @@ public actor LiveIndex {
     private var busy = false
     /// `ContentKind.totals` for the current index; nil after anything changes it.
     var cachedKinds: [ContentKind: UInt64]?
+    private var generation = 0
+    private var subscribers: [UUID: AsyncStream<Int>.Continuation] = [:]
     var kindsComputations = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -52,9 +54,14 @@ public actor LiveIndex {
         guard let uuid = try volume.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString else {
             throw DiskEngineError.posix("volume UUID for \(volume.path)", ENOTSUP)
         }
-        let dir = base.appending(path: "Volumes").appending(path: uuid)
+        let dir = storeDirectory(base: base, uuid: uuid)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    /// `base/Volumes/<uuid>/`; does not create it.
+    public static func storeDirectory(base: URL, uuid: String) -> URL {
+        base.appending(path: "Volumes").appending(path: uuid)
     }
 
     public func open() async throws -> OpenedFrom {
@@ -129,9 +136,9 @@ public actor LiveIndex {
         guard !closed, let index, !changes.isEmpty else { return }
         let maxID = changes.map(\.id).max() ?? index.lastEventID
         do {
-            if try await applyLocked(changes, to: index) { cachedKinds = nil }
+            if try await applyLocked(changes, to: index) { indexChanged() }
         } catch {
-            cachedKinds = nil
+            indexChanged()
             // Part of the change may be in the index; drop the snapshot so a crash means a
             // full rescan, and rescan on the next apply. The event ID stays put.
             needsFullRescan = true
@@ -214,7 +221,7 @@ public actor LiveIndex {
             try? FileManager.default.removeItem(at: temp)
             current = compacted
             index = compacted
-            cachedKinds = nil
+            indexChanged()
         }
         try current.save(to: store)
     }
@@ -223,6 +230,8 @@ public actor LiveIndex {
         await lock()
         defer { unlock() }
         closed = true
+        for continuation in subscribers.values { continuation.finish() }
+        subscribers = [:]
         try? recordHistoryLocked(now: .now)
         watcher?.stop()
         watchTask?.cancel()
@@ -258,7 +267,49 @@ public actor LiveIndex {
         return try body(index)
     }
 
+    /// Like `withIndex`, but waits for any apply or save in progress. Needs `open()`.
+    public func read<R: Sendable>(_ body: @Sendable (ScanIndex) throws -> R) async throws -> R {
+        await lock()
+        defer { unlock() }
+        guard let index else { preconditionFailure("LiveIndex used before open()") }
+        return try body(index)
+    }
+
+    /// A rising generation (from 1) each time the index changes after `open()`: an apply
+    /// that touched it, or a compaction. Finishes on `close()`.
+    public func updates() -> AsyncStream<Int> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<Int>.makeStream()
+        if closed {
+            continuation.finish()
+            return stream
+        }
+        subscribers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.unsubscribe(id) }
+        }
+        return stream
+    }
+
+    /// The history snapshot on or before `today - days`, or nil when there is none.
+    public func baseline(days: Int, now: Date = .now) async throws -> SizeSnapshot? {
+        await lock()
+        defer { unlock() }
+        let today = Day(now, calendar: .current)
+        return try history.snapshot(onOrBefore: today.adding(days: -days, calendar: .current))
+    }
+
     // MARK: - Private
+
+    private func unsubscribe(_ id: UUID) {
+        subscribers[id] = nil
+    }
+
+    private func indexChanged() {
+        cachedKinds = nil
+        generation += 1
+        for continuation in subscribers.values { continuation.yield(generation) }
+    }
 
     var history: HistoryStore { HistoryStore(directory: store.appending(path: "history")) }
 

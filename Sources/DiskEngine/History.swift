@@ -15,6 +15,16 @@ public struct SizeSnapshot: Codable, Sendable, Equatable {
         self.files = files
     }
 
+    /// The size of `key` with the floor rules `ChangeReport` uses for items the snapshot
+    /// left out: just under the floor, and never more than the parent.
+    public func estimatedSize(of key: String, isFile: Bool) -> UInt64 {
+        if let value = sizes[key] { return value }
+        if key.isEmpty { return 0 }
+        let floor = isFile ? Self.fileFloor : Self.folderFloor
+        let parent = key.lastIndex(of: "/").map { String(key[..<$0]) } ?? ""
+        return min(floor - 1, estimatedSize(of: parent, isFile: false))
+    }
+
     public static func capture(_ index: ScanIndex) throws -> SizeSnapshot {
         var sizes: [String: UInt64] = ["": index.folders[0].totalAllocated]
         var files: Set<String> = []
