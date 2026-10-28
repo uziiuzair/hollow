@@ -15,6 +15,11 @@ public struct FolderFlags: OptionSet, Sendable {
     public static let partial = FolderFlags(rawValue: 1 << 3)
     /// No longer reachable from the root; removed at the next compaction.
     public static let garbage = FolderFlags(rawValue: 1 << 4)
+    /// A cloud folder whose contents aren't on this Mac. Never opened, so never downloaded; its parent's listing says
+    /// when that changes.
+    public static let dataless = FolderFlags(rawValue: 1 << 5)
+    /// Its listing hung or was skipped (`DirectoryLister`): it keeps what it had and is listed again later.
+    public static let stale = FolderFlags(rawValue: 1 << 6)
 }
 
 public struct FileFlags: OptionSet, Sendable {

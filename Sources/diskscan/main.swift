@@ -3,6 +3,8 @@ import DiskEngine
 import Foundation
 
 // diskscan <path> [--top N] [--memory] [--hold] [--store <dir>]
+// Before any scan: touching a cloud folder or file must never download it.
+forbidDatalessMaterialization()
 var arguments = Array(CommandLine.arguments.dropFirst())
 @MainActor func option(_ name: String) -> String? {
     guard let flag = arguments.firstIndex(of: name), flag + 1 < arguments.count else { return nil }

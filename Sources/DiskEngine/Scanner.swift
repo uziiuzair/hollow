@@ -23,13 +23,16 @@ public final class DiskScanner: Sendable {
     public let root: URL
     public let storage: URL
     public let workers: Int
+    public let lister: DirectoryLister
     public let progress: AsyncStream<ScanProgress>
     private let progressSink: AsyncStream<ScanProgress>.Continuation
 
-    public init(root: URL, storage: URL, workers: Int = ProcessInfo.processInfo.activeProcessorCount) {
+    public init(root: URL, storage: URL, workers: Int = ProcessInfo.processInfo.activeProcessorCount,
+                lister: DirectoryLister = .shared) {
         self.root = root
         self.storage = storage
         self.workers = max(1, workers)
+        self.lister = lister
         (progress, progressSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
@@ -87,6 +90,7 @@ public final class DiskScanner: Sendable {
         var lastCheckpoint = clock.now
         var failure: (any Error)?
         var stopped = false
+        let lister = self.lister
 
         await withTaskGroup(of: DirectoryListing.self) { group in
             func launch() {
@@ -95,8 +99,11 @@ public final class DiskScanner: Sendable {
                     head += 1
                     let path = index.path(of: folder, rootPath: rootPath)
                     group.addTask(priority: .utility) {
-                        var reader = BulkDirectoryReader()
-                        return reader.list(path: path, folder: folder)
+                        // A folder that hangs reads as timed out: marked stale, and the walk goes on without it.
+                        guard case .listed(let listing) = await lister.list(path: path, folder: folder) else {
+                            return DirectoryListing(folder: folder, outcome: .timedOut, entries: [])
+                        }
+                        return listing
                     }
                     inFlight.insert(folder)
                 }

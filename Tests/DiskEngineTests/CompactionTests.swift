@@ -9,7 +9,7 @@ import Testing
     try FileManager.default.removeItem(at: root.appending(path: "a/gone"))
     var r = BulkDirectoryReader()
     let a = try #require(idx.folder(atRelativePath: "a"))
-    _ = try idx.relist(r.list(path: root.appending(path: "a").path, folder: a))
+    _ = try idx.relist(r.list(path: Fixtures.realPath(root.appending(path: "a")), folder: a))
     #expect(idx.garbageRatio > 0)
 
     let c = try idx.compacted(into: try Fixtures.tempDir())

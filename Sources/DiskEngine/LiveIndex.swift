@@ -1,6 +1,7 @@
 import CoreServices
 import Darwin
 import Foundation
+import os
 
 public enum OpenedFrom: Sendable, Equatable {
     case snapshot
@@ -97,6 +98,9 @@ public struct ApplyStats: Equatable, Sendable {
 /// scans, follows FSEvents from the stored event ID, re-lists only folders that
 /// changed, saves on a debounce, and compacts when garbage builds up.
 public actor LiveIndex {
+    #if DEBUG
+    private static let log = Logger(subsystem: "com.ooozzy.diskinventory", category: "index")
+    #endif
     public let volumeRoot: URL
     public let store: URL
     private let saveDebounce: Duration
@@ -138,6 +142,10 @@ public actor LiveIndex {
     /// When each recently changed path was last applied. Entries older than the window are pruned.
     private var lastRelist: [String: ContinuousClock.Instant] = [:]
     private var flushTask: Task<Void, Never>?
+    /// Folders whose listing hung or was skipped, by absolute path, and when to list them again. Not deferred changes:
+    /// their events count as applied (with what the folder had), so they never hold back the stored event ID.
+    private var staleRetry: [String: ContinuousClock.Instant] = [:]
+    private var lister = DirectoryLister.shared
     private var now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     /// Tests only: false leaves FSEvents unwatched, so only the changes a test feeds in reach the index.
     private var watchEvents = true
@@ -196,11 +204,10 @@ public actor LiveIndex {
         for path in old.symmetricDifference(exclusions) {
             parents.insert(path.lastIndex(of: "/").map { String(path[..<$0]) } ?? "")
         }
-        var reader = BulkDirectoryReader()
         var toScan: [FolderID] = []
         for parent in parents.sorted() {
             guard let folder = index.folder(atRelativePath: parent), !index.folders[Int(folder)].flags.contains(.garbage) else { continue }
-            toScan += try index.relist(reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder)).newFolders
+            toScan += try index.relist(await listing(of: folder, in: index)).newFolders
         }
         try fault?()
         if !toScan.isEmpty { try await scan(index, starting: toScan) }
@@ -215,6 +222,7 @@ public actor LiveIndex {
         let old = exclusions
         exclusions = paths
         index.exclusions = paths
+        defer { armStaleRetries(index) }
         do {
             try await reconcile(from: old, in: index)
         } catch {
@@ -235,15 +243,14 @@ public actor LiveIndex {
         await lock()
         defer { unlock() }
         guard !closed, let index else { return 0 }
-        var reader = BulkDirectoryReader()
+        defer { armStaleRetries(index) }
         var readable = 0
         var toScan: [FolderID] = []
         // Cancelled (an unmount): the folders not yet relisted stay unreadable and are retried at the next open.
         for id in 0..<index.folders.count where !Task.isCancelled {
             let flags = index.folders[id].flags
             guard flags.contains(.unreadable), !flags.contains(.garbage) else { continue }
-            let folder = FolderID(id)
-            let listing = reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder)
+            let listing = await listing(of: FolderID(id), in: index)
             if listing.outcome == .ok { readable += 1 }
             toScan += try index.relist(listing).newFolders
         }
@@ -325,8 +332,10 @@ public actor LiveIndex {
             throw CancellationError()
         }
 
+        if let index { retryStale(in: index) }
         try startWatching(device: device)
         try saveLocked()
+        scheduleFlush()
         return opened
     }
 
@@ -340,6 +349,7 @@ public actor LiveIndex {
         await lock()
         defer { unlock() }
         guard !closed, let index, !changes.isEmpty else { return }
+        defer { armStaleRetries(index) }
         do {
             let start = ContinuousClock.now
             let outcome = try await applyLocked(changes, to: index)
@@ -401,10 +411,15 @@ public actor LiveIndex {
     func flushDue() async {
         guard !closed else { return }
         let now = self.now()
-        let due = deferred.values.filter { change in lastRelist[change.path].map { now - $0 >= coalesceWindow } ?? true }
+        var due = deferred.values.filter { change in lastRelist[change.path].map { now - $0 >= coalesceWindow } ?? true }
         for change in due {
             deferred[change.path] = nil
             lastRelist[change.path] = now
+        }
+        // ID 0: a retry moves the stored event ID nowhere.
+        for (path, at) in staleRetry where at <= now {
+            staleRetry[path] = nil
+            due.append(FSChange(path: path, id: 0, rescanSubtree: false, historyLost: false))
         }
         if let applied = due.map(\.id).max() {
             try? await apply(due, advanceTo: min(applied, deferredFloor))
@@ -419,8 +434,9 @@ public actor LiveIndex {
         guard !closed else { return }
         let now = self.now()
         lastRelist = lastRelist.filter { path, last in deferred[path] != nil || now - last < coalesceWindow }
-        guard !deferred.isEmpty else { return }
-        let end = deferred.keys.compactMap { lastRelist[$0] }.min().map { $0 + coalesceWindow } ?? now
+        guard !deferred.isEmpty || !staleRetry.isEmpty else { return }
+        let ends = deferred.keys.compactMap { lastRelist[$0] }.map { $0 + coalesceWindow } + staleRetry.values
+        let end = ends.min() ?? now
         let delay = max(end - now, .zero)
         flushTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
@@ -441,6 +457,48 @@ public actor LiveIndex {
     /// waits for the lock, so a flush already queued ahead of it is still counted.
     private var deferredFloor: UInt64 {
         deferred.values.map(\.id).min().map { $0 - 1 } ?? .max
+    }
+
+    /// Lists again, once the lister would try them, the folders the index marked stale since the last call.
+    private func armStaleRetries(_ index: ScanIndex) {
+        guard !index.newlyStale.isEmpty else { return }
+        let due = now() + lister.skipFor
+        for folder in index.newlyStale {
+            let flags = index.folders[Int(folder)].flags
+            guard flags.contains(.stale), !flags.contains(.garbage) else { continue }
+            let path = index.path(of: folder, rootPath: index.rootPath)
+            staleRetry[path] = min(staleRetry[path] ?? due, due)
+        }
+        index.newlyStale = []
+        scheduleFlush()
+    }
+
+    /// At open: every stale folder in the index is listed again soon, including those a snapshot carried over.
+    private func retryStale(in index: ScanIndex) {
+        let now = self.now()
+        for id in 0..<index.folders.count {
+            let flags = index.folders[id].flags
+            guard flags.contains(.stale), !flags.contains(.garbage) else { continue }
+            staleRetry[index.path(of: FolderID(id), rootPath: index.rootPath)] = now
+        }
+        index.newlyStale = []
+    }
+
+    /// Lists one folder through the lister, so a folder that hangs costs its deadline, not the lock. One that timed
+    /// out or was skipped reads as `.timedOut`, which `relist` leaves as it was.
+    private func listing(of folder: FolderID, in index: ScanIndex) async -> DirectoryListing {
+        let path = index.path(of: folder, rootPath: index.rootPath)
+        #if DEBUG
+        Self.log.debug("relist \(path, privacy: .public)")
+        #endif
+        let outcome = await lister.list(path: path, folder: folder)
+        guard case .listed(let listing) = outcome else {
+            #if DEBUG
+            Self.log.info("relist \(String(describing: outcome), privacy: .public): \(path, privacy: .public)")
+            #endif
+            return DirectoryListing(folder: folder, outcome: .timedOut, entries: [])
+        }
+        return listing
     }
 
     private static func merged(_ a: FSChange, _ b: FSChange) -> FSChange {
@@ -472,7 +530,11 @@ public actor LiveIndex {
             var subtrees: Set<FolderID> = []
             for change in changes {
                 guard let relative = relativePath(change.path), !isExcluded(relative) else { continue }
-                let folder = deepestFolder(relative, in: index)
+                var folder = deepestFolder(relative, in: index)
+                // A dataless folder is never opened; its parent's listing says whether it still is.
+                while index.folders[Int(folder)].flags.contains(.dataless), index.folders[Int(folder)].parent != noFolder {
+                    folder = index.folders[Int(folder)].parent
+                }
                 if change.rescanSubtree { subtrees.insert(folder) } else { relists.insert(folder) }
             }
 
@@ -494,13 +556,13 @@ public actor LiveIndex {
                 subtreeCount += 1
                 toScan.append(folder)
             }
-            var reader = BulkDirectoryReader()
             for folder in relists where !index.folders[Int(folder)].flags.contains(.garbage) && !toScan.contains(folder) {
-                let listing = reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder)
+                let listing = await listing(of: folder, in: index)
                 relistCount += 1
                 let result = try index.relist(listing)
                 toScan += result.newFolders
-                if result.namesChanged { renamed.insert(index.relativePath(of: folder)) }
+                // A folder left stale is reported too, so the map is redrawn with it marked.
+                if result.namesChanged || listing.outcome == .timedOut { renamed.insert(index.relativePath(of: folder)) }
             }
             try fault?()
             if !toScan.isEmpty { try await scan(index, starting: toScan) }
@@ -556,6 +618,11 @@ public actor LiveIndex {
     /// Test hook, before `open()`: don't start the FSEvents watcher.
     func disableWatcher() {
         watchEvents = false
+    }
+
+    /// Test hook: the lister every directory read goes through.
+    func injectLister(_ lister: DirectoryLister) {
+        self.lister = lister
     }
 
     /// Test hook: the clock the coalescing window is measured with.
@@ -618,6 +685,8 @@ public actor LiveIndex {
         // Their IDs are above the stored event ID, so the next open replays them.
         deferred = [:]
         lastRelist = [:]
+        // Their folders stay marked stale in the snapshot, so the next open lists them again.
+        staleRetry = [:]
         try saveLocked()
     }
 
@@ -720,7 +789,7 @@ public actor LiveIndex {
         let path = rootPath
         let device = rootDevice
         beforeScan?()
-        _ = try await DiskScanner(root: URL(filePath: rootPath), storage: store)
+        _ = try await DiskScanner(root: URL(filePath: rootPath), storage: store, lister: lister)
             .scan(into: target, starting: starting) { checkpointed in
                 // Folders listed after the volume went away read as vanished; stop, don't save.
                 guard Self.isPresent(path, device: device) else { return .stop }

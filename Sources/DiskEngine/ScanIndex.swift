@@ -41,6 +41,8 @@ public final class ScanIndex {
     }
     /// `exclusions` as parent relative path -> excluded child names.
     private var excludedChildren: [String: Set<String>] = [:]
+    /// Folders marked `.stale` since the owner last took them, to list again later.
+    public var newlyStale: [FolderID] = []
     public internal(set) var garbageFolders = 0
     public internal(set) var garbageFiles = 0
     public var scannedAt = Date()
@@ -78,12 +80,16 @@ public final class ScanIndex {
         case .vanished:
             folders[id].flags.insert(.vanished)
             return []
+        case .timedOut:
+            markStale(listing.folder)
+            return []
         case .ok:
             break
         }
 
         if listing.partial { folders[id].flags.insert(.partial) }
 
+        var children: [FolderID] = []
         var newFolders: [FolderID] = []
         var direct: UInt64 = 0
         var pass: Set<UInt64> = []
@@ -96,13 +102,16 @@ public final class ScanIndex {
                 guard shouldDescend(entryDevice: entry.device, rootDevice: rootDevice, isMountPoint: entry.isMountPoint) else { continue }
                 // Directory hard links (HFS+ Time Machine backups): walk each once.
                 if entry.linkCount > 1, !claimHardLink(entry.inode, for: listing.folder, pass: &pass) { continue }
-                newFolders.append(FolderID(folders.count))
+                let new = FolderID(folders.count)
                 folders.append(FolderRecord(parent: listing.folder, nameOffset: folderNames.append(entry.name)))
+                children.append(new)
+                // A dataless folder stays unlisted: opening it could download it.
+                if entry.flags.contains(.dataless) { folders[Int(new)].flags.insert(.dataless) } else { newFolders.append(new) }
                 continue
             }
             direct += try addFile(entry, to: listing.folder, pass: &pass)
         }
-        link(newFolders, under: listing.folder)
+        link(children, under: listing.folder)
         addToTotals(from: listing.folder, Int64(bitPattern: direct))
         return newFolders
     }
@@ -120,6 +129,11 @@ public final class ScanIndex {
     public func relist(_ listing: DirectoryListing) throws -> RelistResult {
         let folder = listing.folder
         let id = Int(folder)
+        // Not read: everything it had stays, sizes included.
+        guard listing.outcome != .timedOut else {
+            markStale(folder)
+            return RelistResult(newFolders: [], namesChanged: false)
+        }
         let old = folders[id]
 
         var oldDirect = old.smallAllocated
@@ -140,17 +154,19 @@ public final class ScanIndex {
         folders[id].bigFileCount = 0
         folders[id].smallFileCount = 0
         folders[id].smallAllocated = 0
-        folders[id].flags.remove([.unreadable, .vanished, .partial])
+        folders[id].flags.remove([.unreadable, .vanished, .partial, .stale, .dataless])
         switch listing.outcome {
         case .unreadable: folders[id].flags.insert(.unreadable)
         case .vanished: folders[id].flags.insert(.vanished)
         case .ok: if listing.partial { folders[id].flags.insert(.partial) }
+        case .timedOut: break
         }
 
         var children: [FolderID] = []
         var newFolders: [FolderID] = []
         var newDirect: UInt64 = 0
         var newBigNames: [String] = []
+        var reshaped = false
         var pass: Set<UInt64> = []
         let skipped = excludedNames(in: folder)
         for entry in listing.outcome == .ok ? listing.entries : [] {
@@ -159,13 +175,21 @@ public final class ScanIndex {
                 guard shouldDescend(entryDevice: entry.device, rootDevice: rootDevice, isMountPoint: entry.isMountPoint) else { continue }
                 if let kept = oldChildren.removeValue(forKey: entry.name) {
                     children.append(kept)
+                    let wasDataless = folders[Int(kept)].flags.contains(.dataless)
+                    if wasDataless != entry.flags.contains(.dataless) {
+                        // Downloaded since: list it now. Evicted: what it held is no longer on this Mac.
+                        resetContents(of: kept)
+                        if wasDataless { newFolders.append(kept) } else { folders[Int(kept)].flags.insert(.dataless) }
+                        reshaped = true
+                    }
                     continue
                 }
                 if entry.linkCount > 1, !claimHardLink(entry.inode, for: folder, pass: &pass) { continue }
                 let new = FolderID(folders.count)
                 folders.append(FolderRecord(parent: folder, nameOffset: folderNames.append(entry.name)))
                 children.append(new)
-                newFolders.append(new)
+                reshaped = true
+                if entry.flags.contains(.dataless) { folders[Int(new)].flags.insert(.dataless) } else { newFolders.append(new) }
                 continue
             }
             let stored = folders[id].bigFileCount
@@ -175,7 +199,7 @@ public final class ScanIndex {
         link(children, under: folder)
         // Kept subfolders were removed from oldChildren, so any left there are gone. Stored files usually list in the
         // same order; only when they don't are they compared as sets.
-        let namesChanged = !oldChildren.isEmpty || !newFolders.isEmpty
+        let namesChanged = !oldChildren.isEmpty || reshaped
             || (newBigNames != oldBigNames && Set(newBigNames) != Set(oldBigNames))
 
         var removedTotal: UInt64 = 0
@@ -186,6 +210,12 @@ public final class ScanIndex {
         let delta = Int64(bitPattern: newDirect) - Int64(bitPattern: oldDirect) - Int64(bitPattern: removedTotal)
         addToTotals(from: folder, delta)
         return RelistResult(newFolders: newFolders, namesChanged: namesChanged)
+    }
+
+    /// Marks a folder whose listing hung or was skipped; it keeps what it had.
+    func markStale(_ folder: FolderID) {
+        folders[Int(folder)].flags.insert(.stale)
+        newlyStale.append(folder)
     }
 
     /// Empties a folder so `integrate` can list it from scratch: its total leaves its
