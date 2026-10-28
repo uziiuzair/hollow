@@ -7,10 +7,15 @@ let package = Package(
     products: [
         .library(name: "DiskEngine", targets: ["DiskEngine"]),
         .executable(name: "diskscan", targets: ["diskscan"]),
+        .library(name: "DiskApp", targets: ["DiskApp"]),
+        .executable(name: "Diskinventory", targets: ["Diskinventory"]),
     ],
     targets: [
         .target(name: "DiskEngine"),
         .executableTarget(name: "diskscan", dependencies: ["DiskEngine"]),
         .testTarget(name: "DiskEngineTests", dependencies: ["DiskEngine"]),
+        .target(name: "DiskApp", dependencies: ["DiskEngine"]),
+        .executableTarget(name: "Diskinventory", dependencies: ["DiskApp"]),
+        .testTarget(name: "DiskAppTests", dependencies: ["DiskApp"]),
     ]
 )
