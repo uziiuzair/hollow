@@ -305,6 +305,19 @@ public final class ScanIndex {
         return parts.reversed().reduce(rootPath) { $0 + "/" + $1 }
     }
 
+    /// The names of the folder's blocks: its subfolders and stored files. Small files are one block whatever their names.
+    public func blockNames(of folder: FolderID) throws -> Set<String> {
+        let record = folders[Int(folder)]
+        var names: Set<String> = []
+        var child = record.firstChildFolder
+        while child != noFolder {
+            names.insert(folderName(child))
+            child = folders[Int(child)].nextSibling
+        }
+        for file in record.firstFile..<(record.firstFile + record.bigFileCount) { names.insert(try files.name(file)) }
+        return names
+    }
+
     /// Subfolders, stored files, and one small-files bucket, largest first.
     public func children(of folder: FolderID) throws -> [Child] {
         let record = folders[Int(folder)]

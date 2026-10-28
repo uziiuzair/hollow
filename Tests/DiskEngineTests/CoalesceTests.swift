@@ -132,6 +132,39 @@ private func change(_ path: String, _ id: UInt64, subtree: Bool = false) -> FSCh
     #expect(first.merged(with: IndexChange(generation: 5, folders: ["": 1])).folders == ["": 4])
 }
 
+// Fix round 1: a move between two touched folders nets zero but moved bytes; the gross figure keeps it.
+@Test func aMoveIntoAChildReportsTheMovedBytes() async throws {
+    let (live, root, base, _) = try await opened(["a/big.bin": 2_000_000, "a/d/g.bin": 10, "b/h.bin": 10], window: .seconds(10))
+    var it = await live.updates().makeAsyncIterator()
+    let size = Int64(Fixtures.allocatedSize(URL(filePath: root + "/a/big.bin")))
+    try FileManager.default.moveItem(atPath: root + "/a/big.bin", toPath: root + "/a/d/big.bin")
+    try await live.apply([change(root + "/a", base + 1), change(root + "/a/d", base + 2)])
+    let moved = try #require(await it.next())
+    #expect(moved.folders == ["a": 0])
+    #expect(moved.moved == ["a": UInt64(2 * size)])
+    #expect(moved.renamed == ["a", "a/d"])
+    try await live.close()
+}
+
+@Test func aSameSizeRenameIsReportedAsRenamed() async throws {
+    let (live, root, base, _) = try await opened(["a/big.bin": 2_000_000, "b/h.bin": 10], window: .seconds(10))
+    var it = await live.updates().makeAsyncIterator()
+    try FileManager.default.moveItem(atPath: root + "/a/big.bin", toPath: root + "/a/other.bin")
+    try await live.apply([change(root + "/a", base + 1)])
+    let renamed = try #require(await it.next())
+    #expect(renamed.folders == ["a": 0] && renamed.moved == ["a": 0] && renamed.renamed == ["a"])
+    try await live.close()
+}
+
+@Test func mergedMovesAddByMagnitude() {
+    let out = IndexChange(generation: 2, folders: ["a/x": 5_000], moved: ["a/x": 5_000], renamed: ["a/x"])
+    let back = IndexChange(generation: 3, folders: ["a": -5_000], moved: ["a": 5_000], renamed: ["a"])
+    let merged = out.merged(with: back)
+    #expect(merged.folders == ["a": 0] && merged.moved == ["a": 10_000] && merged.renamed == ["a", "a/x"])
+    #expect(IndexChange(generation: 1, folders: ["b": -7]).moved == ["b": 7])
+    #expect(out.merged(with: IndexChange(generation: 4, folders: nil)) == IndexChange(generation: 4, folders: nil))
+}
+
 @Test func missingMountPointFailsOpen() async throws {
     let live = LiveIndex(volumeRoot: try Fixtures.tree(["a/f.bin": 10]), store: try Fixtures.tempDir())
     await live.injectMountPointLookup { _ in throw DiskEngineError.posix("statfs", EIO) }

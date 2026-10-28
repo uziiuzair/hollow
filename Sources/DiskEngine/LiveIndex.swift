@@ -15,23 +15,37 @@ public struct IndexChange: Equatable, Sendable {
     /// ancestor is also changed is not listed. Nil when anything may have changed: a full rescan, a compaction, an
     /// exclusions change, a retry of unreadable folders.
     public var folders: [String: Int64]?
+    /// The same outermost paths, each with the bytes that came into or left every touched folder at or under it, added
+    /// by magnitude: a move between two touched folders counts twice, though it nets zero in `folders`. Empty when
+    /// `folders` is nil.
+    public var moved: [String: UInt64]
+    /// Relative paths of the touched folders whose blocks (subfolders and stored files, by name) were added, removed or
+    /// renamed, whatever their sizes. Empty when `folders` is nil.
+    public var renamed: Set<String>
 
-    public init(generation: Int, folders: [String: Int64]?) {
+    /// `moved` defaults to the magnitude of each net delta in `folders`.
+    public init(generation: Int, folders: [String: Int64]?, moved: [String: UInt64]? = nil, renamed: Set<String> = []) {
         self.generation = generation
         self.folders = folders
+        self.moved = folders == nil ? [:] : moved ?? folders!.mapValues(\.magnitude)
+        self.renamed = folders == nil ? [] : renamed
     }
 
-    /// Both changes as one (C16): nil folders win; otherwise each outermost path carries every delta at or below it.
+    /// Both changes as one (C16): nil folders win; otherwise each outermost path carries every delta at or below it,
+    /// nets summed with their signs and moved bytes by magnitude, so a move out and back still counts.
     public func merged(with later: IndexChange) -> IndexChange {
         guard let mine = folders, let theirs = later.folders else { return IndexChange(generation: later.generation, folders: nil) }
         var sums = mine
         for (path, delta) in theirs { sums[path, default: 0] &+= delta }
-        return IndexChange(generation: later.generation, folders: Self.outermost(sums))
+        var moves = moved
+        for (path, bytes) in later.moved { moves[path, default: 0] &+= bytes }
+        return IndexChange(generation: later.generation, folders: Self.outermost(sums), moved: Self.outermost(moves),
+                           renamed: renamed.union(later.renamed))
     }
 
     /// Drops every path that has an ancestor in `deltas`, adding its delta to that ancestor's.
-    static func outermost(_ deltas: [String: Int64]) -> [String: Int64] {
-        var result: [String: Int64] = [:]
+    static func outermost<T: FixedWidthInteger>(_ deltas: [String: T]) -> [String: T] {
+        var result: [String: T] = [:]
         for (path, delta) in deltas {
             result[outermostAncestor(of: path) { deltas[$0] != nil }, default: 0] &+= delta
         }
@@ -327,7 +341,7 @@ public actor LiveIndex {
             switch outcome {
             case .untouched: break
             case .full: indexChanged(folders: nil)
-            case .folders(let deltas): indexChanged(folders: deltas)
+            case .folders(let deltas, let moved, let renamed): indexChanged(folders: deltas, moved: moved, renamed: renamed)
             }
         } catch {
             indexChanged(folders: nil)
@@ -431,8 +445,9 @@ public actor LiveIndex {
         /// Every path was outside the root or excluded.
         case untouched
         case full
-        /// The outermost folders touched, by relative path, with the change in each one's total.
-        case folders([String: Int64])
+        /// The outermost folders touched, by relative path, with the change in each one's total and the bytes moved
+        /// under each; and the touched folders whose blocks changed by name.
+        case folders([String: Int64], moved: [String: UInt64], renamed: Set<String>)
     }
 
     private func applyLocked(_ changes: [FSChange], to index: ScanIndex) async throws -> ApplyOutcome {
@@ -458,7 +473,10 @@ public actor LiveIndex {
             var paths: [String: FolderID] = [:]
             for folder in relists.union(subtrees) { paths[index.relativePath(of: folder)] = folder }
             let outer = paths.filter { path, _ in IndexChange.outermostAncestor(of: path) { paths[$0] != nil } == path }
-            let before = outer.mapValues { index.folders[Int($0)].totalAllocated }
+            // Every touched folder's total and block names before, to report what moved, not only the net.
+            let before = paths.mapValues { index.folders[Int($0)].totalAllocated }
+            var namesBefore: [String: Set<String>] = [:]
+            for (path, folder) in paths where !subtrees.contains(folder) { namesBefore[path] = try index.blockNames(of: folder) }
 
             var toScan: [FolderID] = []
             // Shallow first, so a reset ancestor turns its descendants into garbage first.
@@ -476,11 +494,41 @@ public actor LiveIndex {
             }
             try fault?()
             if !toScan.isEmpty { try await scan(index, starting: toScan) }
-            return .folders(outer.reduce(into: [:]) { result, entry in
-                let after = index.folders[Int(entry.value)].totalAllocated
-                result[entry.key] = Int64(bitPattern: after &- before[entry.key]!)
-            })
+            // Found again by path: a folder a relist removed is gone (0), and one a subtree rescan rebuilt is the new one.
+            var delta: [String: Int64] = [:]
+            var renamed: Set<String> = []
+            for path in paths.keys {
+                let now = index.folder(atRelativePath: path)
+                let after = now.map { index.folders[Int($0)].totalAllocated } ?? 0
+                delta[path] = Int64(bitPattern: after &- before[path]!)
+                if let old = namesBefore[path] {
+                    if try now.map({ try index.blockNames(of: $0) }) != old { renamed.insert(path) }
+                } else {
+                    renamed.insert(path)   // a subtree rescan: what changed by name inside it isn't known
+                }
+            }
+            // A folder's own change is its net minus that of the touched folders nearest below it.
+            var own = delta
+            for path in paths.keys {
+                if let parent = Self.nearestAncestor(of: path, in: paths) { own[parent]! &-= delta[path]! }
+            }
+            var moved: [String: UInt64] = [:]
+            for (path, bytes) in own {
+                moved[IndexChange.outermostAncestor(of: path) { paths[$0] != nil }, default: 0] &+= bytes.magnitude
+            }
+            return .folders(outer.reduce(into: [:]) { $0[$1.key] = delta[$1.key]! }, moved: moved, renamed: renamed)
         }
+    }
+
+    /// The deepest strict ancestor of `path` among `paths` ("" is above everything), or nil.
+    private static func nearestAncestor(of path: String, in paths: [String: FolderID]) -> String? {
+        guard !path.isEmpty else { return nil }
+        var rest = path[...]
+        while let slash = rest.lastIndex(of: "/") {
+            rest = rest[..<slash]
+            if paths[String(rest)] != nil { return String(rest) }
+        }
+        return paths[""] != nil ? "" : nil
     }
 
     /// Saves now (compacting first if needed), waiting for any apply in progress.
@@ -631,10 +679,10 @@ public actor LiveIndex {
         subscribers[id] = nil
     }
 
-    private func indexChanged(folders: [String: Int64]?) {
+    private func indexChanged(folders: [String: Int64]?, moved: [String: UInt64] = [:], renamed: Set<String> = []) {
         cachedKinds = nil
         generation += 1
-        let change = IndexChange(generation: generation, folders: folders)
+        let change = IndexChange(generation: generation, folders: folders, moved: moved, renamed: renamed)
         for continuation in subscribers.values { continuation.yield(change) }
     }
 

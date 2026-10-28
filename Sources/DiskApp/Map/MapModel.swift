@@ -1,6 +1,7 @@
 import CoreGraphics
 import DiskEngine
 import Foundation
+import os
 
 /// Where the map window gets its maps: a drive it can hold warm while the window is open.
 @MainActor
@@ -35,11 +36,26 @@ public final class MapModel: ObservableObject {
     /// window again builds once if they did.
     public var isVisible = true {
         didSet {
-            guard isVisible, !oldValue, staleWhileHidden else { return }
+            guard isVisible != oldValue else { return }
+            if !isVisible {
+                // A build the throttle scheduled would draw for no one: it waits for the window instead.
+                if let trailing {
+                    trailing.cancel(); self.trailing = nil
+                    staleWhileHidden = true
+                }
+                return
+            }
+            guard staleWhileHidden else { return }
             staleWhileHidden = false
             lastSourceBuild = clock.now
-            requestBuild()
+            requestBuild(.shown)
         }
+    }
+
+    /// Why a build started, for the DEBUG `map build` log line.
+    enum BuildTrigger: String {
+        case open, zoom, size, shown, activity
+        case nilFolders = "nil folders", ancestor, renamed, threshold
     }
 
     public let driveName: String
@@ -67,7 +83,12 @@ public final class MapModel: ObservableObject {
     /// Only sourceChanged() builds count toward the throttle window.
     private var lastSourceBuild: ContinuousClock.Instant?
     private var trailing: Task<Void, Never>?
-    /// Bytes changed at or under the zoomed folder since the last build, too few so far to move 1 pt² of the map.
+    #if DEBUG
+    private static let log = Logger(subsystem: AppIdentity.bundleID, category: "map")
+    #endif
+    /// Why the next build starts; the latest request's reason wins.
+    private var trigger: BuildTrigger = .open
+    /// Bytes moved at or under the zoomed folder since the last build, too few so far to move 1 pt² of the map.
     private var pendingBytes: UInt64 = 0
     /// A source change wanted a build while the window was hidden.
     private var staleWhileHidden = false
@@ -120,25 +141,29 @@ public final class MapModel: ObservableObject {
             await source.hold()
             guard isOpen, session == mine else { return }
         }
-        requestBuild()
+        requestBuild(.open)
     }
 
     /// Before open() this only stores the size.
     public func setSize(_ newSize: CGSize) {
         guard newSize != size else { return }
         size = newSize
-        requestBuild()
+        requestBuild(.size)
     }
 
     /// The drive changed (an update, its activity or period). Builds at once, then at most once more per throttle
-    /// window. `change` (an index update) skips the build while what it changed inside the zoomed folder adds up to
-    /// less than 1 pt² of the map; nil always builds.
+    /// window. `change` (an index update) skips the build while the bytes it moved inside the zoomed folder add up to
+    /// less than 1 pt² of the map and no block at the zoom level or one below changed by name; nil always builds.
     public func sourceChanged(_ change: IndexChange? = nil) {
         guard isOpen else { return }
-        if let delta = Self.visibleDelta(change, zoomPath: zoomPath) {
+        let why: BuildTrigger
+        switch Self.visibility(change, zoomPath: zoomPath) {
+        case .always(let reason): why = change == nil ? .activity : reason
+        case .bytes(let delta):
             pendingBytes &+= delta
             let total = Double(max(snapshot?.total ?? 0, 1))
             guard Double(pendingBytes) * Double(size.width) * Double(size.height) / total >= 1 else { return }
+            why = .threshold
         }
         guard isVisible else { staleWhileHidden = true; return }
         guard trailing == nil else { return }
@@ -150,11 +175,11 @@ public final class MapModel: ObservableObject {
                 guard let self, !Task.isCancelled else { return }
                 self.trailing = nil
                 self.lastSourceBuild = self.clock.now
-                self.requestBuild()
+                self.requestBuild(why)
             }
         } else {
             lastSourceBuild = now
-            requestBuild()
+            requestBuild(why)
         }
     }
 
@@ -193,18 +218,29 @@ public final class MapModel: ObservableObject {
     }
 
     /// How many bytes `change` moved at or under `zoomPath` (every path is under ""), or nil when the map must build
-    /// anyway: anything may have changed, or a changed folder is a strict ancestor of `zoomPath`.
+    /// anyway: anything may have changed, a changed folder is a strict ancestor of `zoomPath`, or a block at the zoom
+    /// level or one below was added, removed or renamed.
     nonisolated public static func visibleDelta(_ change: IndexChange?, zoomPath: String) -> UInt64? {
-        guard let folders = change?.folders else { return nil }
-        var sum: UInt64 = 0
-        for (path, delta) in folders {
-            if path == zoomPath || zoomPath.isEmpty || path.hasPrefix(zoomPath + "/") {
-                sum &+= delta.magnitude
-            } else if path.isEmpty || zoomPath.hasPrefix(path + "/") {
-                return nil
-            }
+        if case .bytes(let sum) = visibility(change, zoomPath: zoomPath) { return sum }
+        return nil
+    }
+
+    enum Visibility: Equatable {
+        case bytes(UInt64)
+        case always(BuildTrigger)
+    }
+
+    nonisolated static func visibility(_ change: IndexChange?, zoomPath: String) -> Visibility {
+        guard let change, let folders = change.folders else { return .always(.nilFolders) }
+        func under(_ path: String) -> Bool { zoomPath.isEmpty || path == zoomPath || path.hasPrefix(zoomPath + "/") }
+        if folders.keys.contains(where: { !under($0) && ($0.isEmpty || zoomPath.hasPrefix($0 + "/")) }) {
+            return .always(.ancestor)
         }
-        return sum
+        // The blocks of the zoom folder (depth 1) and of its subfolders (depth 2) are drawn by name.
+        if change.renamed.contains(where: { $0 == zoomPath || (under($0) && parent(of: $0) == zoomPath) }) {
+            return .always(.renamed)
+        }
+        return .bytes(change.moved.reduce(0) { under($1.key) ? $0 &+ $1.value : $0 })
     }
 
     /// Releases the source and drops the map data.
@@ -276,11 +312,12 @@ public final class MapModel: ObservableObject {
         selectedKey = key
         selected = nil
         hovered = nil
-        requestBuild()
+        requestBuild(.zoom)
     }
 
-    private func requestBuild() {
+    private func requestBuild(_ why: BuildTrigger) {
         guard isOpen, size.width > 0, size.height > 0 else { return }
+        trigger = why
         latest += 1
         if inFlight == nil { startBuild() } else { dirty = true }
     }
@@ -291,6 +328,9 @@ public final class MapModel: ObservableObject {
         staleWhileHidden = false
         let id = latest
         let request = MapRequest(path: zoomPath, size: size, period: source.period)
+        #if DEBUG
+        Self.log.info("map build \(request.path, privacy: .public) (\(self.trigger.rawValue, privacy: .public))")
+        #endif
         inFlight = Task { [weak self] in
             guard let source = self?.source else { return }
             let result = await source.buildMap(request)
@@ -361,7 +401,7 @@ public final class MapModel: ObservableObject {
         }
     }
 
-    private static func parent(of path: String) -> String {
+    nonisolated private static func parent(of path: String) -> String {
         guard let slash = path.lastIndex(of: "/") else { return "" }
         return String(path[..<slash])
     }
