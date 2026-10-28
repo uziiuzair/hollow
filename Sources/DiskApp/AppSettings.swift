@@ -23,6 +23,18 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.excludedFolders = excludedFolders
     }
 
+    private enum CodingKeys: String, CodingKey { case menuBarStyle, lowPercent, criticalPercent, excludedFolders }
+
+    /// Every key is optional, so a blob written before a key existed keeps its other values instead of resetting them all.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = AppSettings()
+        menuBarStyle = (try? c.decodeIfPresent(MenuBarStyle.self, forKey: .menuBarStyle)) ?? d.menuBarStyle
+        lowPercent = (try? c.decodeIfPresent(Int.self, forKey: .lowPercent)) ?? d.lowPercent
+        criticalPercent = (try? c.decodeIfPresent(Int.self, forKey: .criticalPercent)) ?? d.criticalPercent
+        excludedFolders = (try? c.decodeIfPresent([String].self, forKey: .excludedFolders)) ?? d.excludedFolders
+    }
+
     public func normalized() -> AppSettings {
         var s = self
         s.lowPercent = min(max(lowPercent, 2), 50)

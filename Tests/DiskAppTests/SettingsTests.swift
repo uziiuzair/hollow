@@ -22,3 +22,13 @@ import Testing
     #expect(s.exclusions(under: data, exists: { ["\(data)/Users/u/VMs", "\(data)/Library/Caches"].contains($0) }) == ["Users/u/VMs", "Library/Caches"])
     #expect(s.exclusions(under: "/Volumes/T7", exists: { _ in true }) == ["Renders"])
 }
+
+// Final review M2: a blob missing a key (written before that key existed) keeps every other value.
+@Test func decodingMissingKeysKeepsTheOthers() {
+    let old = Data(#"{"lowPercent": 20, "criticalPercent": 8, "excludedFolders": ["/Users/u/VMs"]}"#.utf8)
+    let s = AppSettings.decode(old)
+    #expect(s.lowPercent == 20 && s.criticalPercent == 8 && s.excludedFolders == ["/Users/u/VMs"])
+    #expect(s.menuBarStyle == .ringAndNumber)
+    let onlyFolders = AppSettings.decode(Data(#"{"excludedFolders": ["/a"], "futureKey": true}"#.utf8))
+    #expect(onlyFolders.excludedFolders == ["/a"] && onlyFolders.lowPercent == 15 && onlyFolders.criticalPercent == 5)
+}

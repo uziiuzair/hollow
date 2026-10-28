@@ -85,6 +85,11 @@ struct SettingsView: View {
     }
 
     private func setLaunchAtLogin(_ on: Bool) {
+        // The toggle is disabled outside /Applications; this keeps a stray call from registering a dev build too.
+        guard LoginItem.shouldRegister(bundlePath: Bundle.main.bundlePath, home: NSHomeDirectory()) else {
+            login = Self.loginToggle()
+            return
+        }
         do {
             if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         } catch {
