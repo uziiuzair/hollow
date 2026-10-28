@@ -72,6 +72,9 @@ struct MapWindowActions {
     /// The review sheet's move, and the drive's app-managed hits it may never move.
     var trash: ([BasketItem]) async -> TrashOutcome
     var protected: () -> [LensHit]
+    /// The right-click menu for a top-level block or row, and what choosing an item does (it selects the item first).
+    var contextItems: (Int) -> [MapContextItem]
+    var chooseContext: (MapContextAction, Int) -> Void
 }
 
 /// Colors from the approved flat mockup, on the native window background.
@@ -131,7 +134,8 @@ struct MapWindowView: View {
                 HStack(spacing: 0) {
                     mapArea
                     Rectangle().fill(Tokens.line).frame(width: 0.5)
-                    SideList(model: model, tint: ui.tint, drag: actions.drag, drop: actions.drop)
+                    SideList(model: model, tint: ui.tint, drag: actions.drag, drop: actions.drop,
+                             contextItems: actions.contextItems, chooseContext: actions.chooseContext)
                         .frame(width: MapWindowLayout.listWidth(windowWidth: geo.size.width))
                 }
             }
@@ -163,6 +167,7 @@ struct MapWindowView: View {
 
     private var toolbar: some View {
         HStack(spacing: 10) {
+            backButton
             driveChip
             breadcrumb
             Spacer(minLength: 10)
@@ -170,6 +175,21 @@ struct MapWindowView: View {
         }
         .padding(.leading, 78).padding(.trailing, 14)
         .frame(height: 52)
+    }
+
+    private var backButton: some View {
+        let atRoot = model.zoomPath.isEmpty
+        return Button { model.zoomOut() } label: {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7).padding(.vertical, 4)
+                .contentShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+        .disabled(atRoot)
+        .opacity(atRoot ? 0.35 : 1)
+        .help("Enclosing folder (\u{2318}\u{2191})")
     }
 
     private var driveChip: some View {
@@ -312,6 +332,8 @@ private struct SideList: View {
     let tint: Color
     let drag: (BasketDrag) -> Void
     let drop: (BasketDrag) -> Void
+    let contextItems: (Int) -> [MapContextItem]
+    let chooseContext: (MapContextAction, Int) -> Void
     @State private var rowDrag: BasketDrag?
 
     var body: some View {
@@ -349,6 +371,26 @@ private struct SideList: View {
                                     else if model.hovered == row.node { model.hovered = nil }
                                 }
                                 .onTapGesture { if let node = row.node { model.select(node) } }
+                                // Simultaneous, so a single click selects at once; a double-click selects, then opens a folder.
+                                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                                    guard let node = row.node, let snapshot = model.snapshot,
+                                          snapshot.nodes.indices.contains(node) else { return }
+                                    model.select(node)
+                                    if MapClick.opensFolder(clickCount: 2, isFolder: snapshot.nodes[node].isFolder, dragActive: false) {
+                                        model.zoomIn(node)
+                                    }
+                                })
+                                .contextMenu {
+                                    if let node = row.node {
+                                        ForEach(Array(contextItems(node).enumerated()), id: \.offset) { _, item in
+                                            if item.action == .separator {
+                                                Divider()
+                                            } else {
+                                                Button(item.title) { chooseContext(item.action, node) }.disabled(!item.isEnabled)
+                                            }
+                                        }
+                                    }
+                                }
                                 // Rows without a node (the remainder, unreadable folders) can't be dragged (C21).
                                 .gesture(rowDragGesture(row.node ?? -1), including: row.node == nil ? .none : .all)
                             }

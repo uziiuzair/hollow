@@ -7,6 +7,12 @@ import MetalKit
 final class TreemapMTKView: MTKView {
     var onHover: ((CGPoint?) -> Void)?
     var onClick: ((CGPoint) -> Void)?
+    /// A second click on the same spot, after `onClick`; never fires for a drag.
+    var onDoubleClick: ((CGPoint) -> Void)?
+    /// The right-click menu for the block under the point, or nil for none.
+    var onContextMenu: ((CGPoint) -> NSMenu?)?
+    /// A trackpad swipe back (two fingers, to the right).
+    var onBack: (() -> Void)?
     var onResize: ((CGSize) -> Void)?
     /// A press that moved `BasketDrag.threshold` points or more; locations are in the window's content, top-left origin.
     var onDrag: ((BasketDrag) -> Void)?
@@ -39,6 +45,15 @@ final class TreemapMTKView: MTKView {
 
     /// Takes key focus (from the search field too) so the window's keys reach the map.
     override var acceptsFirstResponder: Bool { true }
+
+    /// The first click on a background window lands instead of only activating it.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func menu(for event: NSEvent) -> NSMenu? { onContextMenu?(point(event)) }
+
+    override func swipe(with event: NSEvent) {
+        if event.deltaX > 0 { onBack?() }
+    }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
@@ -122,7 +137,9 @@ final class TreemapMTKView: MTKView {
             return
         }
         let p = point(event)
-        if bounds.contains(p) { onClick?(p) }
+        guard bounds.contains(p) else { return }
+        onClick?(p)
+        if event.clickCount >= 2 { onDoubleClick?(p) }
     }
 
     /// The event in the window's content view, top-left origin: the SwiftUI window's "mapWindow" coordinate space.

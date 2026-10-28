@@ -49,7 +49,14 @@ struct TreemapView: NSViewRepresentable {
                 guard let model, let snapshot = model.snapshot, let hit = snapshot.layout.hitTest(p) else { return }
                 let top = snapshot.layout.topLevel(of: hit)
                 model.select(top)
-                if snapshot.nodes[top].isFolder { model.zoomIn(top) }
+            }
+            view.onDoubleClick = { [weak model] p in
+                guard let model, let snapshot = model.snapshot, let hit = snapshot.layout.hitTest(p) else { return }
+                let top = snapshot.layout.topLevel(of: hit)
+                // The view sends no double-click for a drag.
+                if MapClick.opensFolder(clickCount: 2, isFolder: snapshot.nodes[top].isFolder, dragActive: false) {
+                    model.zoomIn(top)
+                }
             }
             view.onResize = { [weak model] size in model?.setSize(size) }
 
@@ -75,6 +82,9 @@ struct TreemapView: NSViewRepresentable {
             subscriptions.removeAll()
             view.onHover = nil
             view.onClick = nil
+            view.onDoubleClick = nil
+            view.onContextMenu = nil
+            view.onBack = nil
             view.onResize = nil
             view.onDrag = nil
             view.onDrop = nil

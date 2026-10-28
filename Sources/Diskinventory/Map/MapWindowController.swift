@@ -61,6 +61,8 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         let mapView = TreemapMTKView()
         self.mapView = mapView
         mapView?.renderer?.onFirstFrame = { [weak self] in self?.onFirstFrame?() }
+        mapView?.onBack = { [weak self] in self?.model?.zoomOut() }
+        mapView?.onContextMenu = { [weak self] in self?.contextMenu(at: $0) }
 
         let actions = MapWindowActions(
             run: { [weak self] in self?.run($0) },
@@ -72,7 +74,9 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
             drop: { [weak self] in self?.dropped($0) },
             review: { [weak self] in self?.presentReview() },
             trash: { [weak self] items in await self?.moveToTrash(items) ?? .driveGone(items, protected: []) },
-            protected: { [weak self] in self?.driveController?.protectedHits ?? [] })
+            protected: { [weak self] in self?.driveController?.protectedHits ?? [] },
+            contextItems: { [weak self] in self?.contextItems(rect: $0) ?? [] },
+            chooseContext: { [weak self] in self?.chooseContext($0, rect: $1) })
         let hosting = NSHostingView(rootView: MapWindowView(model: model, ui: ui, basket: basket, pointer: MapPointer(),
                                                             dragState: dragState, mapView: mapView, actions: actions))
         // The window, not the SwiftUI content, decides the window's size.
@@ -166,12 +170,19 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     // MARK: Keys
 
     private func installKeyMonitor() {
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .otherMouseUp]) { [weak self] event in
             let handled = MainActor.assumeIsolated {
-                self?.handleKey(event) ?? false
+                event.type == .keyDown ? self?.handleKey(event) ?? false : self?.handleMouseBack(event) ?? false
             }
             return handled ? nil : event
         }
+    }
+
+    /// The mouse's back button (button 3) goes up a level, as in Finder.
+    private func handleMouseBack(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window, event.buttonNumber == 3, let model else { return false }
+        model.zoomOut()
+        return true
     }
 
     /// True when the event was handled and should be swallowed.
@@ -236,6 +247,64 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     private func addToBasket(rect: Int) {
         guard let model, let item = ui?.basketItem(model, rect: rect) else { return }
         basket.add(item)
+    }
+
+    // MARK: Context menu
+
+    /// The items for top-level rect `rect`; none for a bucket. Move to Trash is enabled only when the basket would take it.
+    private func contextItems(rect: Int) -> [MapContextItem] {
+        guard let model, let ui, let nodes = model.snapshot?.nodes, nodes.indices.contains(rect) else { return [] }
+        let canBasket = ui.basketItem(model, rect: rect).map { basket.accepts($0) } ?? false
+        return MapContextMenu.items(for: nodes[rect], canBasket: canBasket, moving: isMovingToTrash)
+    }
+
+    /// Selects `rect`, then does `action`. "Move to Trash…" only queues the item and opens the review sheet.
+    private func chooseContext(_ action: MapContextAction, rect: Int) {
+        guard let model else { return }
+        model.select(rect)
+        // Re-check at the time of the choice: the item may be in the basket or a move may have started since.
+        guard contextItems(rect: rect).first(where: { $0.action == action })?.isEnabled == true else { return }
+        switch action {
+        case .open: zoomIntoSelection()
+        case .showInFinder: run(.revealInFinder)
+        case .copyPath: run(.copyPath)
+        case .addToBasket: addSelectionToBasket()
+        case .moveToTrash:
+            addSelectionToBasket()
+            presentReview()
+        case .separator: break
+        }
+    }
+
+    /// A right-click on the map: selects the block under the pointer, then returns its menu.
+    private func contextMenu(at point: CGPoint) -> NSMenu? {
+        guard let model, let snapshot = model.snapshot, let hit = snapshot.layout.hitTest(point) else { return nil }
+        let top = snapshot.layout.topLevel(of: hit)
+        let items = contextItems(rect: top)
+        guard !items.isEmpty else { return nil }
+        model.select(top)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for item in items {
+            if item.action == .separator { menu.addItem(.separator()); continue }
+            let entry = NSMenuItem(title: item.title, action: #selector(contextItemChosen(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.isEnabled = item.isEnabled
+            entry.representedObject = ContextChoice(action: item.action, rect: top)
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    @objc private func contextItemChosen(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? ContextChoice else { return }
+        chooseContext(choice.action, rect: choice.rect)
+    }
+
+    private final class ContextChoice: NSObject {
+        let action: MapContextAction
+        let rect: Int
+        init(action: MapContextAction, rect: Int) { self.action = action; self.rect = rect }
     }
 
     private func dragChanged(_ drag: BasketDrag) {

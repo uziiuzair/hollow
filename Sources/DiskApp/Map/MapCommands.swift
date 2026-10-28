@@ -71,7 +71,14 @@ public enum MapKey {
             }
         }
         // By character (the event's charactersIgnoringModifiers), so ⌘K works on any layout.
-        if modifiers == .command { return characters?.lowercased() == "k" ? .openCommands : nil }
+        if modifiers == .command {
+            // Finder's: ⌘[ and ⌘↑ go to the enclosing folder, ⌘↓ opens.
+            switch keyCode {
+            case 33, 126: return .zoomOut
+            case 125: return .zoomIn
+            default: return characters?.lowercased() == "k" ? .openCommands : nil
+            }
+        }
         guard modifiers.isEmpty else { return nil }
         switch keyCode {
         case 36: return .zoomIn
@@ -82,5 +89,44 @@ public enum MapKey {
         case 125: return .selectNext
         default: return nil
         }
+    }
+}
+
+public enum MapClick {
+    /// A double-click on a folder opens it; a press that became a drag never counts as a click.
+    public static func opensFolder(clickCount: Int, isFolder: Bool, dragActive: Bool) -> Bool {
+        clickCount >= 2 && isFolder && !dragActive
+    }
+}
+
+public enum MapContextAction: Equatable, Sendable {
+    case open, showInFinder, copyPath, addToBasket, moveToTrash, separator
+}
+
+public struct MapContextItem: Equatable, Sendable {
+    public var title: String
+    public var action: MapContextAction
+    public var isEnabled: Bool
+
+    public init(title: String, action: MapContextAction, isEnabled: Bool = true) {
+        self.title = title
+        self.action = action
+        self.isEnabled = isEnabled
+    }
+}
+
+public enum MapContextMenu {
+    /// The right-click menu for a block or list row. `canBasket` is true when the basket would accept it.
+    /// Buckets get no menu. "Move to Trash…" only queues the item and opens the review sheet; it moves nothing itself.
+    public static func items(for node: MapNode, canBasket: Bool, moving: Bool) -> [MapContextItem] {
+        guard node.kind != nil else { return [] }
+        var result: [MapContextItem] = []
+        if node.isFolder { result.append(MapContextItem(title: "Open", action: .open)) }
+        result.append(MapContextItem(title: "Show in Finder", action: .showInFinder))
+        result.append(MapContextItem(title: "Copy Path", action: .copyPath))
+        result.append(MapContextItem(title: "", action: .separator))
+        result.append(MapContextItem(title: "Add to Basket", action: .addToBasket, isEnabled: canBasket))
+        result.append(MapContextItem(title: "Move to Trash\u{2026}", action: .moveToTrash, isEnabled: canBasket && !moving))
+        return result
     }
 }
