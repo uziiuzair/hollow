@@ -127,6 +127,31 @@ public actor LiveIndex {
         scheduleSave()
     }
 
+    /// Relists every folder that was unreadable when it was last listed (Full Disk Access may have been granted
+    /// since), scans what turns up, and returns how many of them are readable now.
+    public func retryUnreadable() async throws -> Int {
+        await lock()
+        defer { unlock() }
+        guard !closed, let index else { return 0 }
+        var reader = BulkDirectoryReader()
+        var readable = 0
+        var toScan: [FolderID] = []
+        for id in 0..<index.folders.count {
+            let flags = index.folders[id].flags
+            guard flags.contains(.unreadable), !flags.contains(.garbage) else { continue }
+            let folder = FolderID(id)
+            let listing = reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder)
+            if listing.outcome == .ok { readable += 1 }
+            toScan += try index.relist(listing)
+        }
+        if !toScan.isEmpty { try await scan(index, starting: toScan) }
+        if readable > 0 {
+            indexChanged()
+            scheduleSave()
+        }
+        return readable
+    }
+
     public func open() async throws -> OpenedFrom {
         await lock()
         defer { unlock() }

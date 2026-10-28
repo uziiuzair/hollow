@@ -68,6 +68,7 @@ struct DropdownView: View {
             freeSection
             changedSection
             actions
+            if let note = model.accessNote { accessRow(note) }
             footer
         }
         .font(.system(size: 13))
@@ -308,6 +309,26 @@ struct DropdownView: View {
             }
         }
         .padding(.horizontal, 14).padding(.bottom, 12)
+    }
+
+    // MARK: Full Disk Access
+
+    private func accessRow(_ note: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "lock").foregroundStyle(Tokens.fg2)
+            Text(note).foregroundStyle(Tokens.fg2).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button { NSWorkspace.shared.open(FullDiskAccess.settingsURL) } label: {
+                Text("Allow").fontWeight(.medium)
+                    .padding(.horizontal, 10).frame(height: 24)
+                    .background(Tokens.chip, in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+        }
+        .font(.system(size: 11.5))
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .overlay(alignment: .top) { divider() }
     }
 
     // MARK: Footer

@@ -52,13 +52,15 @@ public struct DropdownModel: Equatable, Sendable {
     public var canOpenMap: Bool
     /// "Review N GB to clear": shown while the drive is connected and the lens found at least 0.1 GB that regenerates.
     public var reviewTitle: String?
+    /// Shown while macOS denies Full Disk Access.
+    public var accessNote: String?
 
     private static let barOrder: [ContentKind] = [.appData, .virtualMachines, .developer, .media, .apps, .documents, .caches, .other]
     private static let minus = "\u{2212}"
 
     public static func make(drives: [KnownDrive], selected: String, connected: Set<String>, summary: DriveSummary?,
                             space: VolumeSpace?, activity: DriveActivity, period: Int, connectedSince: Date?,
-                            now: Date, clearable: UInt64? = nil) -> DropdownModel {
+                            now: Date, clearable: UInt64? = nil, fullDiskAccess: FDAStatus = .granted) -> DropdownModel {
         let tabs = tabList(drives, selected: selected, connected: connected)
         let drive = drives.first { $0.uuid == selected }
         let isInternal = drive?.isInternal == true
@@ -107,7 +109,8 @@ public struct DropdownModel: Equatable, Sendable {
                              netIsGrowth: netIsGrowth, emptyMessage: empty, footerLeft: footerLeft,
                              footerRight: !isOnline ? .none : (isInternal ? .settings : .eject),
                              canOpenMap: isOnline,
-                             reviewTitle: clearable.flatMap { isOnline && $0 >= 100_000_000 ? "Review " + Format.gb($0) + " to clear" : nil })
+                             reviewTitle: clearable.flatMap { isOnline && $0 >= 100_000_000 ? "Review " + Format.gb($0) + " to clear" : nil },
+                             accessNote: fullDiskAccess == .denied ? "Some folders can't be read without Full Disk Access." : nil)
     }
 
     private static func tabList(_ drives: [KnownDrive], selected: String, connected: Set<String>) -> [Tab] {

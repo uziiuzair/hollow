@@ -30,6 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var ejecting: Set<String> = []
     private var internalUUID: String?
     private var selected = ""
+    /// What the last probe said; re-probed off main whenever the panel opens.
+    private var fdaStatus: FDAStatus = .unknown
+    private var accessExplainer: AccessExplainer?
     private var observing: AnyCancellable?
     private weak var observedController: DriveController?
 
@@ -96,6 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         observeMounts()
 
+        probeFullDiskAccess(explainIfDue: true)
+
         if LoginItem.shouldRegister(bundlePath: Bundle.main.bundlePath, home: NSHomeDirectory()) {
             do {
                 try LoginItem.registerOnFirstRun(defaults: UserDefaults.standard) { try SMAppService.mainApp.register() }
@@ -134,6 +139,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                         self?.debugCapture(self?.settingsWindow?.window, to: out)
                     }
+                }
+            }
+        }
+        // --show-access-explainer <png>: shows the explainer (without recording that it was shown) and renders it.
+        if let i = CommandLine.arguments.firstIndex(of: "--show-access-explainer"), i + 1 < CommandLine.arguments.count {
+            let out = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+            DispatchQueue.main.async { [weak self] in
+                self?.presentAccessExplainer()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.debugCapture(self?.accessExplainer?.window, to: out)
                 }
             }
         }
@@ -215,7 +230,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for v in volumes {
             var connected = false
             if controllers[v.uuid] == nil, let store = try? LiveIndex.storeDirectory(base: storeBase, volume: v.url) {
-                controllers[v.uuid] = DriveController(volume: v, store: store, exclusions: exclusions(for: v))
+                controllers[v.uuid] = DriveController(volume: v, store: store, exclusions: exclusions(for: v),
+                                                fullDiskAccess: { FullDiskAccess.status() != .denied })
                 connectedSince[v.uuid] = now
                 connected = true
             }
@@ -364,7 +380,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let model = DropdownModel.make(
             drives: registry.all(), selected: selected, connected: connected, summary: summary,
             space: c?.space, activity: c?.activity ?? .offline, period: period,
-            connectedSince: connectedSince[selected], now: .now, clearable: c?.clearable)
+            connectedSince: connectedSince[selected], now: .now, clearable: c?.clearable,
+            fullDiskAccess: fdaStatus)
         if state.model != model { state.model = model }
         if state.period != period { state.period = period }
         // A new controller for the same UUID (remount, failed eject) needs a fresh subscription.
@@ -457,6 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await c.warm() }
         }
         rebuild()
+        probeFullDiskAccess(explainIfDue: false)
         #if DEBUG
         let dataReady = clock.now - started
         #endif
@@ -481,6 +499,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSLog("Diskinventory panel window \(p.windowNumber) frame \(p.frame)")
         NSLog("Diskinventory showPanel main thread: sync+model \(dataReady), total \(clock.now - started)")
         #endif
+    }
+
+    /// Probes off main. A change redraws the panel; at launch a denial shows the explainer once.
+    private func probeFullDiskAccess(explainIfDue: Bool) {
+        Task { @MainActor in
+            let status = await FullDiskAccess.currentStatus()
+            if status != fdaStatus {
+                fdaStatus = status
+                rebuild()
+            }
+            #if DEBUG
+            // Debug runs with flags must not use up the one-time explainer.
+            if CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("--") }) { return }
+            #endif
+            if explainIfDue, AccessExplainer.isDue(status: status) {
+                UserDefaults.standard.set(true, forKey: AccessExplainer.defaultsKey)
+                presentAccessExplainer()
+            }
+        }
+    }
+
+    private func presentAccessExplainer() {
+        let explainer = AccessExplainer()
+        explainer.onClose = { [weak self] in self?.accessExplainer = nil }
+        accessExplainer = explainer
+        NSApp.activate(ignoringOtherApps: true)
+        explainer.showWindow(nil)
     }
 
     private func panelDismissed() {

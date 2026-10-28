@@ -88,3 +88,12 @@ import DiskEngine
                                space: nil, activity: .ready, period: 7, connectedSince: nil, now: .now)
     #expect(m.tabs.map(\.uuid) == ["I", "T7"] && m.footerRight == .eject)
 }
+
+@Test func deniedAccessShowsANote() {
+    func note(_ s: FDAStatus) -> String? {
+        DropdownModel.make(drives: [Fixtures.internalDrive], selected: "I", connected: ["I"], summary: nil, space: nil,
+                           activity: .ready, period: 7, connectedSince: nil, now: .now, fullDiskAccess: s).accessNote
+    }
+    #expect(note(.denied) == "Some folders can't be read without Full Disk Access.")
+    #expect(note(.unknown) == nil && note(.granted) == nil)
+}

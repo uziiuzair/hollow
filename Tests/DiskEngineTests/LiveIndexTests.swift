@@ -89,3 +89,18 @@ import Testing
     #expect(dir.lastPathComponent == uuid)
     #expect(FileManager.default.fileExists(atPath: dir.path))
 }
+
+@Test func unreadableFoldersAreReadOnRetry() async throws {
+    let root = try Fixtures.tree(["a/locked/f.bin": 2_000_000, "a/open.bin": 1_200_000])
+    let locked = root.appending(path: "a/locked").path
+    chmod(locked, 0); defer { chmod(locked, 0o755) }
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir())
+    _ = try await live.open()
+    #expect(await live.withIndex { $0.folders[Int($0.folder(atRelativePath: "a/locked")!)].flags.contains(.unreadable) })
+    #expect(try await live.retryUnreadable() == 0)
+    chmod(locked, 0o755)
+    #expect(try await live.retryUnreadable() == 1)
+    #expect(await live.withIndex { $0.folders[Int($0.folder(atRelativePath: "a/locked")!)].flags.contains(.unreadable) } == false)
+    #expect(await live.withIndex { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root))
+    try await live.close()
+}

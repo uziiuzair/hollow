@@ -52,13 +52,16 @@ public struct ListRow: Equatable, Sendable {
     /// Size over the largest depth-1 size, capped at 1.
     public var fraction: Double
     public var kind: ContentKind?
+    /// A folder macOS won't let the app read (no Full Disk Access). It has no size and no block.
+    public var isUnreadable: Bool
 
-    public init(node: Int?, name: String, size: UInt64, fraction: Double, kind: ContentKind?) {
+    public init(node: Int?, name: String, size: UInt64, fraction: Double, kind: ContentKind?, isUnreadable: Bool = false) {
         self.node = node
         self.name = name
         self.size = size
         self.fraction = fraction
         self.kind = kind
+        self.isUnreadable = isUnreadable
     }
 }
 
@@ -72,9 +75,11 @@ public struct MapSnapshot: Equatable, Sendable {
     /// Parallel to `layout.rects`.
     public var nodes: [MapNode]
     public var list: [ListRow]
+    /// Direct child folders of the zoom folder that can't be read.
+    public var unreadableCount: Int
 
     public init(path: String, rootPath: String, crumbs: [Crumb], total: UInt64, period: Int,
-                layout: TreemapLayout, nodes: [MapNode], list: [ListRow]) {
+                layout: TreemapLayout, nodes: [MapNode], list: [ListRow], unreadableCount: Int = 0) {
         self.path = path
         self.rootPath = rootPath
         self.crumbs = crumbs
@@ -83,6 +88,15 @@ public struct MapSnapshot: Equatable, Sendable {
         self.layout = layout
         self.nodes = nodes
         self.list = list
+        self.unreadableCount = unreadableCount
+    }
+
+    public var unreadableNote: String? {
+        switch unreadableCount {
+        case 0: nil
+        case 1: "1 folder here can't be read."
+        default: "\(unreadableCount) folders here can't be read."
+        }
     }
 
     /// The file or folder on disk, or nil for a bucket.

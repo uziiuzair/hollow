@@ -328,10 +328,20 @@ private struct SideList: View {
                 }
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 8)
+                .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, snapshot.unreadableNote == nil ? 8 : 2)
+                if let note = snapshot.unreadableNote {
+                    Text(note)
+                        .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8).padding(.bottom, 8)
+                }
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(snapshot.list.enumerated()), id: \.offset) { _, row in
+                            if row.isUnreadable {
+                                // Inert: no hover, selection or drag.
+                                UnreadableRowView(name: row.name)
+                            } else {
                             ListRowView(row: row, selected: row.node != nil && row.node == model.selected,
                                         hovered: row.node != nil && row.node == hoveredTop, tint: tint)
                                 .onHover { inside in
@@ -341,6 +351,7 @@ private struct SideList: View {
                                 .onTapGesture { if let node = row.node { model.select(node) } }
                                 // Rows without a node (the remainder, unreadable folders) can't be dragged (C21).
                                 .gesture(rowDragGesture(row.node ?? -1), including: row.node == nil ? .none : .all)
+                            }
                         }
                     }
                 }
@@ -372,6 +383,24 @@ private struct SideList: View {
                 rowDrag = nil
                 drop(d)
             }
+    }
+}
+
+private struct UnreadableRowView: View {
+    let name: String
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "lock").font(.system(size: 10))
+                .frame(width: 18, alignment: .leading)
+            Text(name).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 8)
+            Text("Can't read")
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8).padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .help("Allow Full Disk Access in System Settings to see inside.")
     }
 }
 

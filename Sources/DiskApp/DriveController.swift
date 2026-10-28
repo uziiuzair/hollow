@@ -34,6 +34,8 @@ public final class DriveController: ObservableObject {
     private let coolDown: Duration
     /// Relative paths the index leaves out; passed to every index this controller opens.
     private var exclusions: Set<String>
+    /// Whether to retry unreadable folders after an open: false while macOS still denies access.
+    private let fullDiskAccess: @Sendable () -> Bool
     private var index: LiveIndex?
     private var timer: Task<Void, Never>?
     private var timerID = 0
@@ -67,7 +69,9 @@ public final class DriveController: ObservableObject {
 
     public var hasJournal: Bool { EventWatcher.journalUUID(device: volume.device) != nil }
 
-    public init(volume: VolumeInfo, store: URL, coolDown: Duration = .seconds(300), exclusions: Set<String> = []) {
+    public init(volume: VolumeInfo, store: URL, coolDown: Duration = .seconds(300), exclusions: Set<String> = [],
+                fullDiskAccess: @escaping @Sendable () -> Bool = { true }) {
+        self.fullDiskAccess = fullDiskAccess
         self.exclusions = ExclusionPaths.normalized(exclusions)
         self.volume = volume
         self.store = store
@@ -165,6 +169,11 @@ public final class DriveController: ObservableObject {
                 _ = try await task.value
                 opening = nil
                 index = live
+                // Folders that were unreadable may be readable now. The probe runs off the main actor.
+                let probe = fullDiskAccess
+                if await Task.detached(operation: { probe() }).value, !unmounting {
+                    _ = try? await live.retryUnreadable()
+                }
                 let updates = await live.updates()
                 watching = Task { [weak self] in
                     for await _ in updates { self?.generation += 1 }

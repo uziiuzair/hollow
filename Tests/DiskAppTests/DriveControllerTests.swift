@@ -352,3 +352,25 @@ private struct UnmountingTrash: TrashBackend {
     #expect(c.summary?.scannedBytes == Fixtures.allocatedSize(root.appending(path: "Users/u/Movies/m.mov")))
     await c.cool()
 }
+
+@MainActor @Test func warmRetriesUnreadableFoldersOnlyWhenAccessIsNotDenied() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000, "locked/g.bin": 1_200_000])
+    let locked = root.appending(path: "locked").path
+    defer { chmod(locked, 0o755) }
+    let store = try Fixtures.tempDir()
+    let request = MapRequest(path: "", size: CGSize(width: 400, height: 300), period: 7)
+    chmod(locked, 0)
+    let first = DriveController(volume: try Fixtures.volume(root), store: store)
+    await first.warm(); await first.cool()
+    chmod(locked, 0o755)
+    // Denied: the snapshot is loaded as it was.
+    let denied = DriveController(volume: try Fixtures.volume(root), store: store, fullDiskAccess: { false })
+    await denied.warm()
+    #expect(await denied.buildMap(request)?.unreadableCount == 1)
+    await denied.cool()
+    // Not denied: the folder is relisted once the drive opens.
+    let allowed = DriveController(volume: try Fixtures.volume(root), store: store, fullDiskAccess: { true })
+    await allowed.warm()
+    #expect(await allowed.buildMap(request)?.unreadableCount == 0)
+    await allowed.cool()
+}
