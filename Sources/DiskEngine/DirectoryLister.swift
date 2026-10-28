@@ -49,6 +49,51 @@ public struct ProtectedData: Sendable, Equatable {
     }
 }
 
+/// The folders under which macOS may hold an open() on a per-app consent prompt: Desktop, Documents and Downloads, iCloud
+/// Drive and each File Provider domain, each protected data folder and app container (opened once access is granted), each
+/// Photos library, and each volume under /Volumes (removable and network volumes have their own prompt; telling them from
+/// other external volumes would cost a syscall per request, which could itself hang on a dead mount, so all are treated
+/// alike). Gating opens per root costs an external volume only the overlap of its open() calls, not of its reads.
+public struct ConsentRoots: Sendable, Equatable {
+    /// Relative to the home folder; each is its own root.
+    static let homeRoots = ["Desktop", "Documents", "Downloads", "Library/Mobile Documents"]
+    /// Relative to the home folder; each child is its own root.
+    static let homeParents = ["Library/CloudStorage"] + ProtectedData.containerFolders
+
+    public let homes: [String]
+
+    public init(home: String) {
+        homes = ProtectedData(home: home, ownBundleID: "").homes
+    }
+
+    /// The consent root `path` is, or is under; nil when none.
+    public func root(of path: String) -> String? {
+        for volumes in ["/Volumes/", "/System/Volumes/Data/Volumes/"] where path.hasPrefix(volumes) {
+            let name = path.dropFirst(volumes.count).prefix { $0 != "/" }
+            return name.isEmpty ? nil : volumes + name
+        }
+        for home in homes where path.hasPrefix(home + "/") {
+            let relative = path.dropFirst(home.count + 1)
+            for folder in Self.homeRoots + ProtectedData.homeFolders where relative == folder || relative.hasPrefix(folder + "/") {
+                return home + "/" + folder
+            }
+            for folder in Self.homeParents where relative.hasPrefix(folder + "/") {
+                let name = relative.dropFirst(folder.count + 1).prefix { $0 != "/" }
+                return name.isEmpty ? nil : home + "/" + folder + "/" + name
+            }
+            if relative.hasPrefix(ProtectedData.photosFolder + "/") {
+                var prefix = home + "/" + ProtectedData.photosFolder
+                for part in relative.split(separator: "/").dropFirst() {
+                    prefix += "/" + part
+                    if part.hasSuffix(".photoslibrary") { return prefix }
+                }
+            }
+            return nil
+        }
+        return nil
+    }
+}
+
 /// Lists directories on a fixed pool of `threads` listing threads, each listing under deadlines, so a folder that hangs
 /// in the kernel (a privacy prompt that can't show, a File Provider folder, a dead mount) costs its caller seconds, not
 /// minutes. Four deadlines, each giving up on the caller's behalf while the thread, if it has one, is left blocked:
@@ -63,6 +108,10 @@ public struct ProtectedData: Sendable, Equatable {
 /// A thread that hangs stays counted, so the pool can drain to nothing; then every listing is skipped at once, and that
 /// is logged (by the kind of folder, never the path) along with the pool coming back. A folder that timed out, and
 /// anything under it, is skipped for `skipFor` and while its thread is still out.
+///
+/// Under a consent root (`consentRoot`, see `ConsentRoots`) one request at a time may be in open(): a prompt nobody
+/// answers then holds one thread, never the pool. Other requests under that root wait in the queue without a thread
+/// while it opens, and once it has hung they are skipped at once, until its thread returns.
 public final class DirectoryLister: @unchecked Sendable {
     public enum Outcome: Sendable {
         case listed(DirectoryListing)
@@ -74,7 +123,10 @@ public final class DirectoryLister: @unchecked Sendable {
     }
 
     /// One per process, so the pool covers every volume.
-    public static let shared = DirectoryLister()
+    public static let shared: DirectoryLister = {
+        let roots = ConsentRoots(home: NSHomeDirectory())
+        return DirectoryLister(consentRoot: { roots.root(of: $0) })
+    }()
     private static let log = Logger(subsystem: "com.ooozzy.diskinventory", category: "lister")
 
     public let threads: Int
@@ -85,6 +137,7 @@ public final class DirectoryLister: @unchecked Sendable {
     public let skipFor: Duration
     private let now: @Sendable () -> ContinuousClock.Instant
     private let read: @Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing
+    private let consentRoot: @Sendable (String) -> String?
     /// Runs only the deadline timer, never a listing, so a pool full of blocked threads can't hold it up.
     private let watchdog = DispatchQueue(label: "DirectoryLister.watchdog", qos: .userInitiated)
 
@@ -100,6 +153,8 @@ public final class DirectoryLister: @unchecked Sendable {
         var giveUp: DispatchTime
         /// The QoS the thread takes on while it serves this request.
         var qos: qos_class_t
+        /// The consent root it is under, if any.
+        var root: String?
         var continuation: CheckedContinuation<Outcome, Never>
     }
 
@@ -124,6 +179,11 @@ public final class DirectoryLister: @unchecked Sendable {
     private var lastProgress = DispatchTime.now()
     /// Every thread hung, and that has been reported.
     private var down = false
+    /// Consent roots with a request in open() (at most one each).
+    private var openingRoots: Set<String> = []
+    /// Consent roots with a hung thread, by how many; and the root of each abandoned request, by ticket.
+    private var hungRoots: [String: Int] = [:]
+    private var abandonedRoots: [UInt64: String] = [:]
     private var report: @Sendable (String) -> Void = { DirectoryLister.log.info("\($0, privacy: .public)") }
 
     /// `now` (tests) is the clock `skipFor` is measured with; deadlines always use the real one. `read` must call its
@@ -131,6 +191,7 @@ public final class DirectoryLister: @unchecked Sendable {
     public init(threads: Int = 8, timeout: Duration = .seconds(5), startTimeout: Duration = .seconds(5),
                 queueLimit: Duration = .seconds(60), idleTimeout: Duration = .seconds(30), skipFor: Duration = .seconds(600),
                 now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+                consentRoot: @escaping @Sendable (String) -> String? = { _ in nil },
                 read: @escaping @Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing
                     = DirectoryLister.read) {
         self.threads = max(1, threads)
@@ -140,6 +201,7 @@ public final class DirectoryLister: @unchecked Sendable {
         self.idleTimeout = idleTimeout
         self.skipFor = skipFor
         self.now = now
+        self.consentRoot = consentRoot
         self.read = read
     }
 
@@ -182,8 +244,9 @@ public final class DirectoryLister: @unchecked Sendable {
                 let current = now()
                 skipUntil = skipUntil.filter { $0.value > current }
                 func under(_ top: String) -> Bool { path == top || path.hasPrefix(top + "/") }
+                let root = consentRoot(path)
                 if busy.contains(path) || hung.contains(where: under) || skipUntil.keys.contains(where: under)
-                    || hung.count >= threads {
+                    || hung.count >= threads || root.map({ hungRoots[$0] != nil }) == true {
                     return false
                 }
                 busy.insert(path)
@@ -191,7 +254,7 @@ public final class DirectoryLister: @unchecked Sendable {
                 let made = DispatchTime.now()
                 requests[nextTicket] = Request(path: path, folder: folder, phase: .queued,
                                                deadline: made + Self.interval(min(startTimeout, queueLimit)),
-                                               giveUp: made + Self.interval(queueLimit), qos: qos,
+                                               giveUp: made + Self.interval(queueLimit), qos: qos, root: root,
                                                continuation: continuation)
                 queue.append(nextTicket)
                 if queue.count > idle, running < threads {
@@ -222,8 +285,9 @@ public final class DirectoryLister: @unchecked Sendable {
             idle += 1
             var ticket: UInt64?
             while ticket == nil {
-                if !queue.isEmpty {
-                    ticket = queue.removeFirst()
+                // The oldest request whose consent root has no open() in progress; the others wait without a thread.
+                if let at = queue.firstIndex(where: { requests[$0]?.root.map { !openingRoots.contains($0) } ?? true }) {
+                    ticket = queue.remove(at: at)
                 } else if !condition.wait(until: Date(timeIntervalSinceNow: 60)) && queue.isEmpty {
                     idle -= 1
                     running -= 1
@@ -233,6 +297,7 @@ public final class DirectoryLister: @unchecked Sendable {
             }
             idle -= 1
             guard let ticket, var request = requests[ticket] else { condition.unlock(); continue }
+            if let root = request.root { openingRoots.insert(root) }
             request.phase = .opening
             request.deadline = .now() + Self.interval(timeout)
             requests[ticket] = request
@@ -251,8 +316,9 @@ public final class DirectoryLister: @unchecked Sendable {
     private func progress(_ ticket: UInt64) {
         condition.withLock {
             // An abandoned thread reading on says nothing about whether the pool will get to the queue.
-            guard requests[ticket] != nil else { return }
+            guard let request = requests[ticket] else { return }
             lastProgress = .now()
+            if request.phase == .opening { endOpening(request) }
             requests[ticket]!.phase = .reading
             requests[ticket]!.deadline = .now() + Self.interval(idleTimeout)
             armWatchdog()
@@ -268,10 +334,15 @@ public final class DirectoryLister: @unchecked Sendable {
                 // longer skipped.
                 hung.remove(path)
                 skipUntil[path] = nil
+                if let root = abandonedRoots.removeValue(forKey: ticket) {
+                    hungRoots[root, default: 1] -= 1
+                    if hungRoots[root] == 0 { hungRoots[root] = nil }
+                }
                 guard down else { return (nil, nil) }
                 down = false
                 return (nil, "Listing pool back: a hung thread returned, \(hung.count) of \(threads) still hung")
             }
+            if request.phase == .opening { endOpening(request) }
             return (request, nil)
         }
         if let message { condition.withLock { report }(message) }
@@ -287,6 +358,13 @@ public final class DirectoryLister: @unchecked Sendable {
         watchdog.asyncAfter(deadline: earliest) { self.expire() }
     }
 
+    /// The request has left open() (opened, finished or abandoned): the next one under its root may open. Lock held.
+    private func endOpening(_ request: Request) {
+        guard let root = request.root else { return }
+        openingRoots.remove(root)
+        condition.broadcast()
+    }
+
     private func expire() {
         let (overdue, message) = condition.withLock { () -> ([(Request, Outcome)], String?) in
             let current = DispatchTime.now()
@@ -297,7 +375,20 @@ public final class DirectoryLister: @unchecked Sendable {
                 requests[ticket] = nil
                 hung.insert(request.path)
                 skipUntil[request.path] = now() + skipFor
+                if request.phase == .opening { endOpening(request) }
+                if let root = request.root {
+                    // Its thread is out: the root's other requests skip until it returns.
+                    hungRoots[root, default: 0] += 1
+                    abandonedRoots[ticket] = root
+                }
                 given.append((request, .timedOut))
+            }
+            // Queued under a root that has just hung: they would only wait behind it.
+            for (ticket, request) in requests where request.phase == .queued && request.root.map({ hungRoots[$0] != nil }) == true {
+                requests[ticket] = nil
+                queue.removeAll { $0 == ticket }
+                busy.remove(request.path)
+                given.append((request, .skipped))
             }
             // A queued request past its deadline waits on while threads still finish or read, up to `queueLimit`; once
             // every thread hung, or none has for `startTimeout`, it is skipped. Never started: no thread to leave behind.
