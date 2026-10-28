@@ -35,3 +35,21 @@ enum Fixtures {
 extension Array {
     var single: Element? { count == 1 ? first : nil }
 }
+
+@testable import DiskEngine
+
+private nonisolated(unsafe) var nextInode: UInt64 = 1_000
+
+extension RawEntry {
+    static func file(_ name: String, allocated: UInt64, inode: UInt64? = nil, links: UInt32 = 1) -> RawEntry {
+        nextInode += 1
+        return RawEntry(name: name, kind: .file, allocated: allocated, logical: allocated, device: 1,
+                        inode: inode ?? nextInode, linkCount: links, flags: [], isMountPoint: false)
+    }
+
+    static func dir(_ name: String) -> RawEntry {
+        nextInode += 1
+        return RawEntry(name: name, kind: .directory, allocated: 0, logical: 0, device: 1,
+                        inode: nextInode, linkCount: 1, flags: [], isMountPoint: false)
+    }
+}
