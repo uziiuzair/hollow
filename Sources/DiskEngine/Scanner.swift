@@ -65,8 +65,8 @@ public final class DiskScanner: Sendable {
     /// Lists `starting` and everything below them into `index`, using `index.rootPath`
     /// and `index.rootDevice`. Every `checkpointEvery`, `index.pending` is set to all
     /// queued and in-flight folders and `checkpoint` runs; returning `.stop` ends the
-    /// scan with those folders still pending. On completion `pending` is empty.
-    /// Returns the number of unreadable folders. Finishes `progress` when done.
+    /// scan with those folders still pending. Cancelling the task does the same. On
+    /// completion `pending` is empty. Returns the number of unreadable folders. Finishes `progress` when done.
     public func scan(
         into index: ScanIndex,
         starting: [FolderID],
@@ -132,6 +132,11 @@ public final class DiskScanner: Sendable {
                     group.cancelAll()
                     break
                 }
+                if Task.isCancelled {
+                    stopped = true
+                    group.cancelAll()
+                    break
+                }
                 if clock.now - lastReport >= .milliseconds(100) {
                     progressSink.yield(stats)
                     lastReport = clock.now
@@ -140,13 +145,19 @@ public final class DiskScanner: Sendable {
             }
             // Listings still arriving after a stop are dropped; those folders stay pending.
             while await group.next() != nil {}
+            // Cancelled before anything was launched: nothing came back to notice it.
+            if !stopped, Task.isCancelled, !(inFlight.isEmpty && head == queue.count) { stopped = true }
         }
 
         if let failure {
             index.pending = Array(inFlight) + queue[head...]
             throw failure
         }
-        if !stopped { index.pending = [] }
+        if stopped {
+            index.pending = Array(inFlight) + queue[head...]
+        } else {
+            index.pending = []
+        }
         progressSink.yield(stats)
         return unreadable
     }

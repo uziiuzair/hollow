@@ -28,6 +28,8 @@ public final class DriveController: ObservableObject {
     private var timer: Task<Void, Never>?
     private var timerID = 0
     private var unmounting = false
+    /// The open in progress, so an unmount can cut its scan short.
+    private var opening: Task<OpenedFrom, any Error>?
     /// Every warm/cool/unmount body runs through this chain, strictly one at a time.
     private var lifecycle: Task<Void, Never>?
 
@@ -73,11 +75,13 @@ public final class DriveController: ObservableObject {
         }
     }
 
-    /// Marks the drive offline at once, then waits for everything queued before it and
-    /// its own close. Later warm() calls do nothing.
+    /// Marks the drive offline at once, stops any scan in progress (it stays resumable),
+    /// then waits for everything queued before it and its own close. Later warm() calls
+    /// do nothing.
     public func willUnmount() async {
         unmounting = true
         activity = .offline
+        opening?.cancel()
         await run { await self.coolBody() }
     }
 
@@ -91,15 +95,22 @@ public final class DriveController: ObservableObject {
             let live = LiveIndex(volumeRoot: volume.url, store: store)
             // Without a snapshot or a journal, open() will do a full scan.
             activity = (snapshotExists && hasJournal) ? .opening : .scanning
+            let task = Task { try await live.open() }
+            opening = task
+            // An unmount that came in before the task existed still cancels it.
+            if unmounting { task.cancel() }
             do {
-                _ = try await live.open()
+                _ = try await task.value
+                opening = nil
                 index = live
             } catch {
+                opening = nil
                 try? await live.close()
                 if !unmounting { activity = .idle }
                 return
             }
         }
+        guard !unmounting else { return }
         await refresh()
         guard !unmounting else { return }
         activity = .ready

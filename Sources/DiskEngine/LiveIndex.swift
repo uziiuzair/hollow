@@ -19,6 +19,10 @@ public actor LiveIndex {
 
     var index: ScanIndex?
     private var rootPath = ""
+    private var rootDevice: dev_t = 0
+    /// Set once the root is found gone or replaced (volume unmounted under us). The
+    /// index may then be missing whole subtrees, so it is never saved or recorded again.
+    private var rootLost = false
     private var mountPoint = ""
     private var watcher: EventWatcher?
     private var watchTask: Task<Void, Never>?
@@ -29,6 +33,7 @@ public actor LiveIndex {
     /// Set when an apply failed part-way: the index can't be trusted until a full rescan.
     private var needsFullRescan = false
     private var fault: (@Sendable () throws -> Void)?
+    private var beforeScan: (@Sendable () -> Void)?
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -59,6 +64,7 @@ public actor LiveIndex {
         guard stat(rootPath, &info) == 0 else { throw DiskEngineError.posix("stat \(rootPath)", errno) }
         guard info.st_mode & S_IFMT == S_IFDIR else { throw DiskEngineError.notADirectory(rootPath) }
         let device = info.st_dev
+        rootDevice = device
         let journal = EventWatcher.journalUUID(device: device)
         let volumeURL = try URL(filePath: rootPath).resourceValues(forKeys: [.volumeURLKey]).volume ?? URL(filePath: "/")
         mountPoint = volumeURL.path(percentEncoded: false).trimmingTrailingSlash()
@@ -96,6 +102,15 @@ public actor LiveIndex {
             loaded?.rootDevice = device
             index = loaded
             opened = .snapshot
+        }
+
+        guard rootPresent() else {
+            throw DiskEngineError.posix("volume removed during scan of \(rootPath)", ENODEV)
+        }
+        if let index, !index.pending.isEmpty {
+            // Cut short (cancelled): keep it only as a resumable snapshot, never as complete.
+            try saveLocked()
+            throw CancellationError()
         }
 
         try startWatching(device: device)
@@ -167,8 +182,13 @@ public actor LiveIndex {
         self.fault = fault
     }
 
+    /// Test hook: runs before every scan starts.
+    func injectBeforeScan(_ hook: (@Sendable () -> Void)?) {
+        beforeScan = hook
+    }
+
     private func saveLocked() throws {
-        guard !needsFullRescan, var current = index else { return }
+        guard !needsFullRescan, var current = index, rootPresent() else { return }
         if current.garbageRatio > compactAbove {
             let temp = store.appending(path: "compact.tmp")
             try? FileManager.default.removeItem(at: temp)
@@ -234,7 +254,8 @@ public actor LiveIndex {
     var history: HistoryStore { HistoryStore(directory: store.appending(path: "history")) }
 
     private func recordHistoryLocked(now: Date) throws {
-        guard let index else { return }
+        // A cut-short scan or a vanished root would record sizes that are too small.
+        guard let index, index.pending.isEmpty, rootPresent() else { return }
         let today = Day(now, calendar: .current)
         try history.record(try SizeSnapshot.capture(index), on: today)
         try history.prune(today: today)
@@ -255,11 +276,27 @@ public actor LiveIndex {
 
     private func scan(_ target: ScanIndex, starting: [FolderID]) async throws {
         let store = self.store
+        let path = rootPath
+        let device = rootDevice
+        beforeScan?()
         _ = try await DiskScanner(root: URL(filePath: rootPath), storage: store)
             .scan(into: target, starting: starting) { checkpointed in
+                // Folders listed after the volume went away read as vanished; stop, don't save.
+                guard Self.isPresent(path, device: device) else { return .stop }
                 try checkpointed.save(to: store)
                 return .proceed
             }
+    }
+
+    /// False once the root has gone or is now a different file system. Sticky.
+    private func rootPresent() -> Bool {
+        if !rootLost, !Self.isPresent(rootPath, device: rootDevice) { rootLost = true }
+        return !rootLost
+    }
+
+    private static func isPresent(_ path: String, device: dev_t) -> Bool {
+        var info = stat()
+        return stat(path, &info) == 0 && info.st_dev == device
     }
 
     private func startWatching(device: dev_t) throws {
