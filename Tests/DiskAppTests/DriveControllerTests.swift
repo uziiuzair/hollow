@@ -51,7 +51,7 @@ private func closedCleanly(_ store: URL) throws -> Bool {
 @MainActor @Test func exFATScansOnlyWhenSelected() async throws {
     let root = try Fixtures.tree(["a/f.bin": 2_000_000]); let store = try Fixtures.tempDir()
     let c = DriveController(volume: try Fixtures.volume(root), store: store)
-    c.refreshSpace()
+    await c.refreshSpace()
     #expect(c.space != nil)
     #expect(!FileManager.default.fileExists(atPath: store.appending(path: "index.snapshot").path))
 }

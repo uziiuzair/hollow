@@ -72,6 +72,18 @@ public final class DriveRegistry: @unchecked Sendable {
         return drive
     }
 
+    /// Moves a known drive's `lastSeen` forward in memory only; the next write saves it.
+    public func markSeen(_ uuid: String, now: Date) {
+        lock.lock(); defer { lock.unlock() }
+        if let i = drives.firstIndex(where: { $0.uuid == uuid }), drives[i].lastSeen < now { drives[i].lastSeen = now }
+    }
+
+    /// True when `upsert` would add the drive or change its name.
+    public func needsWrite(for v: VolumeInfo) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return drives.first(where: { $0.uuid == v.uuid })?.name != v.name
+    }
+
     public func all() -> [KnownDrive] {
         lock.lock(); defer { lock.unlock() }
         return drives

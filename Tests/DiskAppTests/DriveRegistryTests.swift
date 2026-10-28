@@ -29,3 +29,20 @@ import Foundation
     #expect(try Data(contentsOf: aside) == garbage)
     #expect(reg.all().count == 1)
 }
+
+// Final review 3: a panel open marks connected drives seen without rewriting drives.json;
+// the next real write carries it.
+@Test func markSeenUpdatesMemoryWithoutWriting() throws {
+    let file = try Fixtures.tempDir().appending(path: "drives.json")
+    let reg = DriveRegistry(file: file)
+    let v = VolumeInfo(url: URL(filePath: "/Volumes/T7"), uuid: "T7", name: "T7", isInternalData: false, device: 3)
+    _ = try reg.upsert(v, space: nil, now: Date(timeIntervalSince1970: 1_000))
+    let written = try Data(contentsOf: file)
+    let later = Date(timeIntervalSince1970: 2_000)
+    reg.markSeen("T7", now: later)
+    #expect(reg.all().first?.lastSeen == later)
+    #expect(try Data(contentsOf: file) == written)
+    #expect(reg.needsWrite(for: v) == false)
+    #expect(reg.needsWrite(for: VolumeInfo(url: v.url, uuid: "T7", name: "Renamed", isInternalData: false, device: 3)))
+    #expect(reg.needsWrite(for: VolumeInfo(url: v.url, uuid: "New", name: "New", isInternalData: false, device: 4)))
+}

@@ -21,6 +21,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controllers: [String: DriveController] = [:]
     private var connectedSince: [String: Date] = [:]
     private var unmounts: [String: Task<Void, Never>] = [:]
+    /// When each unmount in `unmounts` finished; a drive still mounted well after that
+    /// had its unmount refused.
+    private var unmountFinished: [String: Date] = [:]
+    /// Drives the app is ejecting right now (between close and the system's answer).
+    private var ejecting: Set<String> = []
     private var internalUUID: String?
     private var selected = ""
     private var observing: AnyCancellable?
@@ -87,11 +92,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Menu bar label
 
+    /// Reads free space off the main thread, then updates the status item.
     private func refresh() {
-        guard let space = try? VolumeSpace.read(dataVolume), let button = statusItem.button else { return }
-        let label = MenuBarLabel.make(space: space, showNumber: true)
-        button.image = StatusIcon.image(fill: label.fillFraction, level: label.level)
-        button.title = label.text.isEmpty ? "" : " " + label.text
+        let volume = dataVolume
+        Task { [weak self] in
+            let read = await Task.detached(priority: .utility) { try? VolumeSpace.read(volume) }.value
+            guard let self, let space = read, let button = self.statusItem.button else { return }
+            let label = MenuBarLabel.make(space: space, showNumber: true)
+            button.image = StatusIcon.image(fill: label.fillFraction, level: label.level)
+            button.title = label.text.isEmpty ? "" : " " + label.text
+        }
     }
 
     private func recordHistory() {
@@ -115,22 +125,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         })
     }
 
-    /// Creates a controller for every mounted drive that has none, and records it in the registry.
+    /// Creates a controller for every mounted drive that has none, replaces one whose
+    /// unmount was refused, and records drives in the registry. Runs on every panel open,
+    /// so it reads no free space here and writes drives.json only when a drive is new,
+    /// renamed or newly connected.
     private func syncVolumes() {
         guard registry != nil else { return }
         let now = Date()
-        for var v in VolumeCatalog.current() {
-            if v.isInternalData, v.name.hasSuffix(" - Data") {
-                v = VolumeInfo(url: v.url, uuid: v.uuid, name: String(v.name.dropLast(7)),
-                               isInternalData: true, device: v.device)
-            }
+        let volumes = VolumeCatalog.current().map { v in
+            guard v.isInternalData, v.name.hasSuffix(" - Data") else { return v }
+            return VolumeInfo(url: v.url, uuid: v.uuid, name: String(v.name.dropLast(7)),
+                              isInternalData: true, device: v.device)
+        }
+        // A refused unmount (Finder: "disk in use") sends no didUnmount; the spent
+        // controller would show the mounted drive as "Not connected" for good.
+        for uuid in VolumeSync.spentControllersToReplace(
+            mounted: Set(volumes.map(\.uuid)), unmountFinished: unmountFinished, ejecting: ejecting, now: now) {
+            controllers[uuid] = nil
+            unmounts[uuid] = nil
+            unmountFinished[uuid] = nil
+        }
+        for v in volumes {
+            var connected = false
             if controllers[v.uuid] == nil, let store = try? LiveIndex.storeDirectory(base: storeBase, volume: v.url) {
                 controllers[v.uuid] = DriveController(volume: v, store: store)
                 connectedSince[v.uuid] = now
+                connected = true
             }
             if v.isInternalData { internalUUID = v.uuid }
-            if unmounts[v.uuid] == nil {
-                _ = try? registry.upsert(v, space: try? VolumeSpace.read(v.url), now: now)
+            guard unmounts[v.uuid] == nil else { continue }
+            if connected || registry.needsWrite(for: v) {
+                _ = try? registry.upsert(v, space: controllers[v.uuid]?.space, now: now)
+                if connected, let c = controllers[v.uuid] {
+                    // Free space at connect time, read off the main thread.
+                    Task { [weak self] in
+                        await c.refreshSpace()
+                        guard let self, self.controllers[v.uuid] === c, self.unmounts[v.uuid] == nil else { return }
+                        _ = try? self.registry.upsert(v, space: c.space, now: .now)
+                    }
+                }
+            } else {
+                registry.markSeen(v.uuid, now: now)
             }
         }
         if selected.isEmpty || !registry.all().contains(where: { $0.uuid == selected }) {
@@ -152,7 +187,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = try? registry.upsert(c.volume, space: c.space, now: .now)
         let task = Task { [weak self] in
             await c.willUnmount()
-            self?.rebuild()
+            guard let self else { return }
+            if self.unmounts[uuid] != nil { self.unmountFinished[uuid] = Date() }
+            self.rebuild()
         }
         unmounts[uuid] = task
         rebuild()
@@ -173,6 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await self.beginUnmount(uuid)?.value
                 self.controllers[uuid] = nil
                 self.unmounts[uuid] = nil
+                self.unmountFinished[uuid] = nil
                 self.connectedSince[uuid] = nil
             }
             self.syncVolumes()
@@ -186,15 +224,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let name = c.volume.name
         // Registered synchronously so a second click cannot start another eject.
         let unmount = beginUnmount(uuid)
+        ejecting.insert(uuid)
         Task { [weak self] in
             await unmount?.value
             do {
                 try await Task.detached { try NSWorkspace.shared.unmountAndEjectDevice(at: url) }.value
+                self?.ejecting.remove(uuid)
             } catch {
                 // Still mounted: this controller is spent, so start a fresh one.
                 guard let self else { return }
+                self.ejecting.remove(uuid)
                 self.controllers[uuid] = nil
                 self.unmounts[uuid] = nil
+                self.unmountFinished[uuid] = nil
                 self.syncVolumes()
                 let alert = NSAlert()
                 alert.messageText = "Could not eject \(name)"
@@ -222,7 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard registry != nil else { return }
         let connected = Set(controllers.keys.filter { unmounts[$0] == nil })
         let c = liveController
-        if let c, c.space == nil { c.refreshSpace() }
+        if let c, c.space == nil { Task { await c.refreshSpace() } }
         let model = DropdownModel.make(
             drives: registry.all(), selected: selected, connected: connected, summary: c?.summary,
             space: c?.space, activity: c?.activity ?? .offline, period: c?.period ?? 7,
@@ -238,7 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         selected = uuid
         observeSelected()
         if let c = liveController {
-            c.refreshSpace()
+            Task { await c.refreshSpace() }
             Task { await c.warm() }
         }
         rebuild()
@@ -278,15 +320,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPanel(keepOpen: Bool) {
+        #if DEBUG
+        let clock = ContinuousClock()
+        let started = clock.now
+        #endif
         syncVolumes()
         let p = panel ?? makePanel()
         panel = p
         p.closesOnResign = !keepOpen
         if let c = liveController {
-            c.refreshSpace()
+            Task { await c.refreshSpace() }
             Task { await c.warm() }
         }
         rebuild()
+        #if DEBUG
+        let dataReady = clock.now - started
+        #endif
         var anchor = statusItem.button?.window.flatMap { w in
             statusItem.button.map { w.convertToScreen($0.convert($0.bounds, to: nil)) }
         }
@@ -306,6 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         #if DEBUG
         NSLog("Diskinventory panel window \(p.windowNumber) frame \(p.frame)")
+        NSLog("Diskinventory showPanel main thread: sync+model \(dataReady), total \(clock.now - started)")
         #endif
     }
 

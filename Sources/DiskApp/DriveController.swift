@@ -30,6 +30,7 @@ public final class DriveController: ObservableObject {
     private var unmounting = false
     /// The open in progress, so an unmount can cut its scan short.
     private var opening: Task<OpenedFrom, any Error>?
+    private var spaceRead: Task<Void, Never>?
     /// Every warm/cool/unmount body runs through this chain, strictly one at a time.
     private var lifecycle: Task<Void, Never>?
 
@@ -85,8 +86,18 @@ public final class DriveController: ObservableObject {
         await run { await self.coolBody() }
     }
 
-    public func refreshSpace() {
-        if let s = try? VolumeSpace.read(volume.url) { space = s }
+    /// Reads free space off the main thread (a read takes 7-57 ms); calls made while a
+    /// read is in flight share it.
+    public func refreshSpace() async {
+        if let spaceRead { return await spaceRead.value }
+        let url = volume.url
+        let task = Task {
+            let read = await Task.detached(priority: .userInitiated) { try? VolumeSpace.read(url) }.value
+            if let read { self.space = read }
+            self.spaceRead = nil
+        }
+        spaceRead = task
+        await task.value
     }
 
     private func warmBody() async {
@@ -129,7 +140,7 @@ public final class DriveController: ObservableObject {
 
     private func refresh() async {
         guard let index else { return }
-        refreshSpace()
+        await refreshSpace()
         let days = period
         guard let fresh = try? await index.summary(since: days) else { return }
         try? fresh.save(to: store)
