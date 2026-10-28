@@ -77,19 +77,86 @@ public struct ReviewSheet: Equatable, Sendable {
         return rules.rule(covering: item.path, includeParents: false)
     }
 
-    /// The instruction shown instead of a checkbox, or nil when the item may be trashed.
-    static func refusal(for item: BasketItem, protected: [LensHit], rules: LensRules) -> String? {
+    static let structuralReason = "This is a system or account folder; remove things inside it instead."
+
+    /// Why an item may not be trashed.
+    enum Refusal: Equatable, Sendable {
+        /// Another app manages it (it is, or is inside, an app-managed location). `Trasher` skips it silently.
+        case managed(String)
+        /// The drive root, or a system or account folder.
+        case structural
+        /// It holds, or may hold, an app-managed location. `Trasher` fails it.
+        case holds(String)
+
+        var instruction: String {
+            switch self {
+            case .managed(let s), .holds(let s): s
+            case .structural: ReviewSheet.structuralReason
+            }
+        }
+    }
+
+    /// The one predicate both the review sheet and `Trasher` use. It needs no `protected` list to refuse app-managed
+    /// locations: the rules' own patterns refuse them and every folder that could hold one.
+    static func refusalKind(for item: BasketItem, protected: [LensHit], rules: LensRules) -> Refusal? {
         let rule = rule(for: item, rules: rules)
         if item.safety == .appManaged || rule?.safety == .appManaged {
-            return rule?.instruction ?? managedFallback
+            return .managed(rule?.instruction ?? managedFallback)
         }
         if let hit = item.managingHit(in: protected) {
-            return rules.rule(id: hit.ruleID)?.instruction ?? managedFallback
+            return .managed(rules.rule(id: hit.ruleID)?.instruction ?? managedFallback)
         }
+        let scan = rules.appManagedScan(item.path)
+        if case .inside(let r)? = scan { return .managed(r.instruction ?? managedFallback) }
+        if StructuralFolders.contains(item.path) { return .structural }
         if let hit = item.containedHit(in: protected) {
             let hitRule = rules.rule(id: hit.ruleID)
-            return "Contains \(hitRule?.name ?? hit.name). " + (hitRule?.instruction ?? managedFallback)
+            return .holds("Contains \(hitRule?.name ?? hit.name). " + (hitRule?.instruction ?? managedFallback))
         }
+        if case .ancestor(let r)? = scan { return .holds("May contain \(r.name). " + (r.instruction ?? managedFallback)) }
         return nil
+    }
+
+    /// The instruction shown instead of a checkbox, or nil when the item may be trashed.
+    static func refusal(for item: BasketItem, protected: [LensHit], rules: LensRules) -> String? {
+        refusalKind(for: item, protected: protected, rules: rules)?.instruction
+    }
+}
+
+/// Folders that are never trashed whole: the drive root, top-level system folders and each account's standard folders.
+/// Relative to the drive root, compared case-insensitively.
+enum StructuralFolders {
+    static let patterns: [LensPattern] = [
+        "Users/*", "Users/*/Library", "Users/*/.Trash",
+        "Users/*/Desktop", "Users/*/Documents", "Users/*/Downloads", "Users/*/Movies", "Users/*/Music",
+        "Users/*/Pictures", "Users/*/Public", "Users/*/Applications",
+        "Applications", "Library", "System", "Users", "Volumes", "private",
+        ".Trashes", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100",
+    ].map(LensPattern.init)
+
+    static func contains(_ relativePath: String) -> Bool {
+        relativePath.split(separator: "/").isEmpty || patterns.contains { $0.matches(relativePath) }
+    }
+}
+
+extension LensRules {
+    enum ManagedScan: Equatable {
+        /// The path is, or is inside, a location this app-managed rule matches.
+        case inside(LensRule)
+        /// The path is a folder above a location this app-managed rule could match.
+        case ancestor(LensRule)
+    }
+
+    /// Prefix-tests every app-managed rule's pattern against the path. Skip lists are ignored, on purpose.
+    func appManagedScan(_ relativePath: String) -> ManagedScan? {
+        let managed = rules.indices.filter { rules[$0].safety == .appManaged }
+        var masks = managed.map { patterns[$0].start }
+        for part in relativePath.lowercased().split(separator: "/") {
+            for k in managed.indices where masks[k] != 0 {
+                masks[k] = patterns[managed[k]].step(masks[k], String(part))
+                if patterns[managed[k]].accepts(masks[k]) { return .inside(rules[managed[k]]) }
+            }
+        }
+        return managed.indices.first { masks[$0] != 0 }.map { .ancestor(rules[managed[$0]]) }
     }
 }

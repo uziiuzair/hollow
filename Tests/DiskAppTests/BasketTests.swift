@@ -91,7 +91,7 @@ let dockerHit = LensHit(ruleID: "docker", path: "Users/u/Library/Containers/com.
                  item("Users/u/Library/Containers/com.docker.docker/Data/Docker.raw", 1), item("Users/u/Library/Containers/com.dockerx", 1, folder: true)]
     let s = ReviewSheet.make(items: items, unchecked: [], protected: [dockerHit], driveName: "Macintosh HD", driveConnected: true)
     #expect(s.rows.map(\.isCheckable) == [false, false, false, true])
-    #expect(s.rows[0].instruction == "Contains Docker. Reclaim space in Docker \u{203A} Settings \u{203A} Resources.")
+    #expect(s.rows[0].instruction == "This is a system or account folder; remove things inside it instead.")
     #expect(s.rows[1].instruction == "Reclaim space in Docker \u{203A} Settings \u{203A} Resources.")
     #expect(ReviewSheet.trashable(items, unchecked: [], protected: [dockerHit]).map(\.path) == ["Users/u/Library/Containers/com.dockerx"])
     #expect(s.buttonTitle == "Move 1 item to Trash")
@@ -102,4 +102,30 @@ let dockerHit = LensHit(ruleID: "docker", path: "Users/u/Library/Containers/com.
     #expect(TrashPath.userPath(root: "/System/Volumes/Data/", relative: "Users/u/x.bin") == "/Users/u/x.bin")
     #expect(TrashPath.userPath(root: "/Volumes/T7", relative: "a/b.bin") == "/Volumes/T7/a/b.bin")
     #expect(TrashPath.physicalPath(root: "/System/Volumes/Data", relative: "Users/u/x.bin") == "/System/Volumes/Data/Users/u/x.bin")
+}
+
+@Test func reviewRefusesAppManagedHoldersEvenWithoutAProtectedList() {
+    let items = [item("Users/u/Library/Containers", 9, folder: true), item("x/holder", 9, folder: true),
+                 BasketItem(path: "Users/u/Library/Containers/com.docker.docker", name: "com.docker.docker", size: 1, kind: .virtualMachines,
+                            isFolder: true, ruleID: "docker", safety: nil),
+                 item("Users/u/Library/Caches", 4, folder: true)]
+    let s = ReviewSheet.make(items: items, unchecked: [], protected: [
+        LensHit(ruleID: "photos-library", path: "x/holder/P.photoslibrary", name: "P.photoslibrary", size: 1, isFolder: true, safety: .appManaged)],
+        driveName: "Macintosh HD", driveConnected: true)
+    #expect(s.rows.map(\.isCheckable) == [false, false, false, true])
+    #expect(s.rows[0].instruction == "May contain Docker. Reclaim space in Docker \u{203A} Settings \u{203A} Resources.")
+    #expect(s.rows[1].instruction == "Contains Photos library. Shrink it from inside Photos, not here.")
+    #expect(s.rows[2].instruction == "Reclaim space in Docker \u{203A} Settings \u{203A} Resources.")
+    #expect(s.selectedTotal == 4 && s.buttonTitle == "Move 1 item to Trash")
+}
+
+@Test func structuralFoldersHaveNoCheckbox() {
+    let paths = ["", "Users", "Users/u", "Users/u/Library", "USERS/u/Pictures", "Users/u/.Trash", "Users/u/Applications", "Volumes",
+                 "System", "Library", ".Trashes", ".Spotlight-V100", ".DocumentRevisions-V100"]
+    let s = ReviewSheet.make(items: paths.map { item($0, 1, folder: true) } + [item("Users/u/Movies/clip.mov", 2)], unchecked: [],
+                             protected: [], driveName: "Macintosh HD", driveConnected: true)
+    #expect(s.rows.map(\.isCheckable) == Array(repeating: false, count: paths.count) + [true])
+    #expect(s.rows[1].instruction == "This is a system or account folder; remove things inside it instead.")
+    #expect(s.rows[4].instruction == "This is a system or account folder; remove things inside it instead.")
+    #expect(s.selectedTotal == 2)
 }

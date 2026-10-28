@@ -61,9 +61,10 @@ public struct TrashOutcome: Equatable, Sendable {
         }
     }
 
-    /// Every item that would have moved fails with `.driveGone`. App-managed items are left out, as `Trasher` leaves them out.
-    public static func driveGone(_ items: [BasketItem]) -> TrashOutcome {
-        TrashOutcome(moved: [], failures: items.filter { $0.safety != .appManaged }
+    /// Every item that would have moved fails with `.driveGone`. Items `Trasher` would refuse are left out, as it leaves them out.
+    public static func driveGone(_ items: [BasketItem], protected: [LensHit], rules: LensRules = .bundled) -> TrashOutcome {
+        TrashOutcome(moved: [], failures: items
+            .filter { TrashPath.isPlainRelative($0.path) && ReviewSheet.refusalKind(for: $0, protected: protected, rules: rules) == nil }
             .map { TrashFailureItem(path: $0.path, name: $0.name, reason: .driveGone) }, freed: 0)
     }
 }
@@ -96,60 +97,120 @@ public enum TrashPath {
 }
 
 /// The only code that moves user files. It moves only what the caller passes (the items checked in the review sheet), never
-/// app-managed items, and never anything that resolves outside the drive.
+/// app-managed items, system or account folders, or anything that resolves outside the drive or onto another device.
 public enum Trasher {
     static let containsManaged = "Contains an item managed by another app."
 
-    /// `root` must be the drive's resolved root (`realpath`). `protected` is the drive's app-managed hits: an item that is or is
-    /// inside one is skipped silently, and an item holding one fails without moving. The moves run off the main thread.
-    public static func moveToTrash(_ items: [BasketItem], root: String, protected: [LensHit],
-                                   backend: some TrashBackend) async -> TrashOutcome {
+    /// The result of `lstat`: the record, or the errno.
+    enum StatResult { case ok(stat), failed(Int32) }
+
+    static func realStat(_ path: String) -> StatResult {
+        var st = stat()
+        return lstat(path, &st) == 0 ? .ok(st) : .failed(errno)
+    }
+
+    /// `root` must be the drive's resolved root (`realpath`). Every item passes the review sheet's own refusal check again here,
+    /// with `rules`, so app-managed locations are refused even when `protected` (the drive's app-managed hits) is empty or stale:
+    /// an app-managed item is skipped silently, and a system folder or a folder that holds or could hold an app-managed
+    /// location fails without moving. With `expectedDevice`, a root on any other device moves nothing. The moves run off main.
+    public static func moveToTrash(_ items: [BasketItem], root: String, protected: [LensHit], rules: LensRules = .bundled,
+                                   expectedDevice: dev_t? = nil, backend: some TrashBackend) async -> TrashOutcome {
         await Task.detached(priority: .utility) {
-            move(items, root: root, protected: protected, backend: backend)
+            move(items, root: root, protected: protected, rules: rules, expectedDevice: expectedDevice, backend: backend, stat: realStat)
         }.value
     }
 
-    private static func move(_ items: [BasketItem], root: String, protected: [LensHit], backend: some TrashBackend) -> TrashOutcome {
+    static func move(_ items: [BasketItem], root: String, protected: [LensHit], rules: LensRules, expectedDevice: dev_t?,
+                     backend: some TrashBackend, stat statFn: (String) -> StatResult) -> TrashOutcome {
         let base = TrashPath.trimmed(root)
+        // nil: moved. Paths absent from `results` were skipped silently.
+        var results: [String: TrashFailure?] = [:]
+
+        var candidates: [BasketItem] = []
+        for item in items where results[item.path] == nil && !candidates.contains(where: { $0.path == item.path }) {
+            guard TrashPath.isPlainRelative(item.path) else { results[item.path] = .some(.outsideDrive); continue }
+            switch ReviewSheet.refusalKind(for: item, protected: protected, rules: rules) {
+            case .managed?: continue
+            case .structural?: results[item.path] = .some(.failed(ReviewSheet.structuralReason))
+            case .holds?: results[item.path] = .some(.failed(containsManaged))
+            case nil: candidates.append(item)
+            }
+        }
+        // An item inside another item of the same request moves with it, and its bytes count once, in the outer item.
+        func outermost(_ item: BasketItem) -> BasketItem? {
+            candidates.filter { $0.path != item.path && $0.covers(item.path) }.min { $0.path.count < $1.path.count }
+        }
+        let outers = candidates.filter { outermost($0) == nil }
+
+        func rootDevice() -> dev_t? {
+            if case .ok(let st) = statFn(base), (st.st_mode & S_IFMT) == S_IFDIR { return st.st_dev }
+            return nil
+        }
+        var freed: UInt64 = 0
+        let device = rootDevice()
+        for item in outers {
+            // The root is checked before every item, so an ejected or replaced drive fails the rest as gone, not as already gone.
+            guard let device, expectedDevice == nil || expectedDevice == device, rootDevice() == device else {
+                results[item.path] = .some(.driveGone)
+                continue
+            }
+            let reason = moveOne(item, base: base, device: device, backend: backend, stat: statFn)
+            results[item.path] = .some(reason)
+            if reason == nil { freed += item.size }
+        }
+        for item in candidates {
+            if let outer = outermost(item) { results[item.path] = results[outer.path] ?? .some(.driveGone) }
+        }
+
         var moved: [String] = []
         var failures: [TrashFailureItem] = []
-        var freed: UInt64 = 0
-        for item in items {
-            if item.safety == .appManaged || item.managingHit(in: protected) != nil { continue }
-            func fail(_ reason: TrashFailure) { failures.append(TrashFailureItem(path: item.path, name: item.name, reason: reason)) }
-            if item.containedHit(in: protected) != nil { fail(.failed(containsManaged)); continue }
-            guard TrashPath.isPlainRelative(item.path) else { fail(.outsideDrive); continue }
-
-            let physical = TrashPath.physicalPath(root: base, relative: item.path)
-            var itemStat = stat()
-            // lstat: the item itself is never followed, so a symlink item moves as the link.
-            guard lstat(physical, &itemStat) == 0 else { fail(failure(errno: errno)); continue }
-            // The parent must still resolve inside the drive. A folder on the way swapped for a symlink fails here.
-            // Known gap (accepted): the parent could still be swapped between this check and the move. That needs a local attacker
-            // racing a list the user just reviewed by hand, and the check still stops every stale or mistaken path.
-            let parent = (physical as NSString).deletingLastPathComponent
-            guard let resolved = realPath(parent) else { fail(failure(errno: errno)); continue }
-            guard resolved == base || resolved.hasPrefix(base == "/" ? "/" : base + "/") else { fail(.outsideDrive); continue }
-
-            let target = trashPath(physical: physical, physicalStat: itemStat, root: base, relative: item.path)
-            do {
-                try backend.trash(URL(filePath: target, directoryHint: .notDirectory))
+        var seen: Set<String> = []
+        for item in items where seen.insert(item.path).inserted {
+            guard let result = results[item.path] else { continue }
+            if let reason = result {
+                failures.append(TrashFailureItem(path: item.path, name: item.name, reason: reason))
+            } else {
                 moved.append(item.path)
-                freed += item.size
-            } catch {
-                fail(failure(error))
             }
         }
         return TrashOutcome(moved: moved, failures: failures, freed: freed)
     }
 
+    /// Nil when the item moved.
+    private static func moveOne(_ item: BasketItem, base: String, device: dev_t, backend: some TrashBackend,
+                                stat statFn: (String) -> StatResult) -> TrashFailure? {
+        let physical = TrashPath.physicalPath(root: base, relative: item.path)
+        // lstat: the item itself is never followed, so a symlink item moves as the link.
+        let itemStat: stat
+        switch statFn(physical) {
+        case .ok(let st): itemStat = st
+        case .failed(let code): return failure(errno: code)
+        }
+        // A different drive mounted inside the root, or anything else on another device, is not this drive.
+        guard itemStat.st_dev == device else { return .outsideDrive }
+        // The parent must still resolve inside the drive. A folder on the way swapped for a symlink fails here.
+        // Known gap (accepted): the parent could still be swapped between this check and the move. That needs a local attacker
+        // racing a list the user just reviewed by hand, and the check still stops every stale or mistaken path.
+        let parent = (physical as NSString).deletingLastPathComponent
+        guard let resolved = realPath(parent) else { return failure(errno: errno) }
+        guard resolved == base || resolved.hasPrefix(base == "/" ? "/" : base + "/") else { return .outsideDrive }
+
+        let target = trashPath(physical: physical, physicalStat: itemStat, root: base, relative: item.path, stat: statFn)
+        do {
+            try backend.trash(URL(filePath: target, directoryHint: .notDirectory))
+            return nil
+        } catch {
+            return failure(error)
+        }
+    }
+
     /// The user path when it names the very same file (same device and inode, checked without following the item), else the
     /// physical path. Not every top-level folder of the Data volume has a firmlink at `/`.
-    private static func trashPath(physical: String, physicalStat: stat, root: String, relative: String) -> String {
+    private static func trashPath(physical: String, physicalStat: stat, root: String, relative: String,
+                                  stat statFn: (String) -> StatResult) -> String {
         let user = TrashPath.userPath(root: root, relative: relative)
-        guard user != physical else { return physical }
-        var st = stat()
-        guard lstat(user, &st) == 0, st.st_dev == physicalStat.st_dev, st.st_ino == physicalStat.st_ino else { return physical }
+        guard user != physical, case .ok(let st) = statFn(user), st.st_dev == physicalStat.st_dev, st.st_ino == physicalStat.st_ino
+        else { return physical }
         return user
     }
 
