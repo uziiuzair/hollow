@@ -3,6 +3,7 @@ import Foundation
 
 public enum DiskEngineError: Error {
     case posix(String, Int32)
+    case notADirectory(String)
 }
 
 /// A file that is written by appending through a 1 MB buffer and read through a

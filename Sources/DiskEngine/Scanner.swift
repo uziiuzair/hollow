@@ -34,9 +34,14 @@ public final class DiskScanner: Sendable {
         let clock = ContinuousClock()
         let started = clock.now
 
-        let rootPath = root.path(percentEncoded: false).trimmingSuffix("/")
+        // Resolve a symlinked root (/tmp, /var, user aliases) so the walk starts at a real folder.
+        let given = root.path(percentEncoded: false)
+        guard let resolved = realpath(given, nil) else { throw DiskEngineError.posix("realpath \(given)", errno) }
+        let rootPath = String(cString: resolved).trimmingSuffix("/")
+        free(resolved)
         var info = stat()
         guard lstat(rootPath, &info) == 0 else { throw DiskEngineError.posix("lstat \(rootPath)", errno) }
+        guard info.st_mode & S_IFMT == S_IFDIR else { throw DiskEngineError.notADirectory(rootPath) }
         let rootDevice = info.st_dev
 
         let index = try ScanIndex(rootName: root.lastPathComponent, storage: storage)

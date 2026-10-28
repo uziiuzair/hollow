@@ -37,11 +37,14 @@ public struct DirectoryListing: Sendable {
     public var folder: FolderID
     public var outcome: ListingOutcome
     public var entries: [RawEntry]
+    /// True when some entries could not be read, so `entries` is incomplete.
+    public var partial: Bool
 
-    public init(folder: FolderID, outcome: ListingOutcome, entries: [RawEntry]) {
+    public init(folder: FolderID, outcome: ListingOutcome, entries: [RawEntry], partial: Bool = false) {
         self.folder = folder
         self.outcome = outcome
         self.entries = entries
+        self.partial = partial
     }
 }
 
@@ -55,9 +58,9 @@ struct BulkDirectoryReader {
     private static let efMayShareBlocks: UInt64 = 0x1
     private static let cmnextExtFlags: UInt32 = 0x200
 
-    private static let common = UInt32(ATTR_CMN_RETURNED_ATTRS) | UInt32(ATTR_CMN_NAME) | UInt32(ATTR_CMN_DEVID)
+    private static let common = UInt32(ATTR_CMN_RETURNED_ATTRS) | UInt32(ATTR_CMN_ERROR) | UInt32(ATTR_CMN_NAME) | UInt32(ATTR_CMN_DEVID)
         | UInt32(ATTR_CMN_OBJTYPE) | UInt32(ATTR_CMN_FLAGS) | UInt32(ATTR_CMN_FILEID)
-    private static let dir = UInt32(ATTR_DIR_MOUNTSTATUS)
+    private static let dir = UInt32(ATTR_DIR_LINKCOUNT) | UInt32(ATTR_DIR_MOUNTSTATUS)
     private static let file = UInt32(ATTR_FILE_LINKCOUNT) | UInt32(ATTR_FILE_ALLOCSIZE) | UInt32(ATTR_FILE_DATALENGTH)
 
     /// Owns the read buffer so it is freed with the reader.
@@ -87,27 +90,34 @@ struct BulkDirectoryReader {
         request.forkattr = Self.cmnextExtFlags
 
         var entries: [RawEntry] = []
+        var partial = false
         while true {
             let count = getattrlistbulk(fd, &request, buffer.baseAddress!, Self.bufferSize, Self.fsoptAttrCmnExtended)
             if count < 0 {
                 if errno == EINTR { continue }
-                let outcome: ListingOutcome = entries.isEmpty && (errno == EACCES || errno == EPERM) ? .unreadable : .ok
-                return DirectoryListing(folder: folder, outcome: outcome, entries: entries)
+                let failure = errno
+                if entries.isEmpty && (failure == EACCES || failure == EPERM) {
+                    return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
+                }
+                // ENOENT: the folder was removed while we read it; what we have is all there is.
+                return DirectoryListing(folder: folder, outcome: .ok, entries: entries, partial: partial || failure != ENOENT)
             }
             if count == 0 { break }
             var entryStart = 0
             for _ in 0..<count {
                 let length = Int(buffer.load(fromByteOffset: entryStart, as: UInt32.self))
-                entries.append(Self.parse(UnsafeRawBufferPointer(rebasing: buffer[entryStart..<(entryStart + length)])))
+                let parsed = Self.parse(UnsafeRawBufferPointer(rebasing: buffer[entryStart..<(entryStart + length)]))
+                if parsed.error == 0 { entries.append(parsed.entry) } else { partial = true }
                 entryStart += length
             }
         }
-        return DirectoryListing(folder: folder, outcome: .ok, entries: entries)
+        return DirectoryListing(folder: folder, outcome: .ok, entries: entries, partial: partial)
     }
 
     /// Parses one entry. Fields appear in the kernel's fixed order (common, directory,
     /// file, then extended common), and only those flagged in `returned` are present.
-    private static func parse(_ e: UnsafeRawBufferPointer) -> RawEntry {
+    /// A non-zero `error` means the kernel could not read this entry's attributes.
+    static func parse(_ e: UnsafeRawBufferPointer) -> (entry: RawEntry, error: UInt32) {
         var cursor = 4
         func take<T>(_: T.Type) -> T {
             let value = e.loadUnaligned(fromByteOffset: cursor, as: T.self)
@@ -116,6 +126,7 @@ struct BulkDirectoryReader {
         }
         let returned = take(attribute_set_t.self)
         func has(_ set: UInt32, _ bit: Int32) -> Bool { set & UInt32(bit) != 0 }
+        let error = has(returned.commonattr, ATTR_CMN_ERROR) ? take(UInt32.self) : 0
 
         var name = ""
         if has(returned.commonattr, ATTR_CMN_NAME) {
@@ -130,8 +141,9 @@ struct BulkDirectoryReader {
         let objType = has(returned.commonattr, ATTR_CMN_OBJTYPE) ? take(UInt32.self) : 0
         let bsdFlags = has(returned.commonattr, ATTR_CMN_FLAGS) ? take(UInt32.self) : 0
         let inode = has(returned.commonattr, ATTR_CMN_FILEID) ? take(UInt64.self) : 0
+        let dirLinkCount = has(returned.dirattr, ATTR_DIR_LINKCOUNT) ? take(UInt32.self) : 1
         let mountStatus = has(returned.dirattr, ATTR_DIR_MOUNTSTATUS) ? take(UInt32.self) : 0
-        let linkCount = has(returned.fileattr, ATTR_FILE_LINKCOUNT) ? take(UInt32.self) : 1
+        let fileLinkCount = has(returned.fileattr, ATTR_FILE_LINKCOUNT) ? take(UInt32.self) : 1
         let allocated = has(returned.fileattr, ATTR_FILE_ALLOCSIZE) ? take(Int64.self) : 0
         let logical = has(returned.fileattr, ATTR_FILE_DATALENGTH) ? take(Int64.self) : 0
         let extFlags = returned.forkattr & cmnextExtFlags != 0 ? take(UInt64.self) : 0
@@ -148,11 +160,12 @@ struct BulkDirectoryReader {
         if extFlags & efMayShareBlocks != 0 { flags.insert(.mayShareBlocks) }
         if kind == .symlink { flags.insert(.symlink) }
 
-        return RawEntry(
+        let entry = RawEntry(
             name: name, kind: kind,
             allocated: kind == .directory ? 0 : UInt64(max(allocated, 0)),
             logical: UInt64(max(logical, 0)),
-            device: device, inode: inode, linkCount: linkCount, flags: flags,
+            device: device, inode: inode, linkCount: kind == .directory ? dirLinkCount : fileLinkCount, flags: flags,
             isMountPoint: mountStatus & UInt32(DIR_MNTSTATUS_MNTPOINT) != 0)
+        return (entry, error)
     }
 }

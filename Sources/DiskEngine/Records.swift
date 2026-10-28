@@ -11,6 +11,8 @@ public struct FolderFlags: OptionSet, Sendable {
     public static let unreadable = FolderFlags(rawValue: 1 << 0)
     public static let vanished = FolderFlags(rawValue: 1 << 1)
     public static let otherDevice = FolderFlags(rawValue: 1 << 2)
+    /// Some entries could not be read; the folder total may be low.
+    public static let partial = FolderFlags(rawValue: 1 << 3)
 }
 
 public struct FileFlags: OptionSet, Sendable {

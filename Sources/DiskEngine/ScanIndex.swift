@@ -11,7 +11,7 @@ public func shouldDescend(entryDevice: Int32, rootDevice: Int32, isMountPoint: B
 public final class ScanIndex {
     public static let bigFileThreshold: UInt64 = 1_048_576
 
-    public private(set) var folders: ContiguousArray<FolderRecord> = []
+    public private(set) var folders = PagedArray<FolderRecord>()
     public let files: FileTable
     public private(set) var top = TopFiles()
     private var folderNames = NamePool()
@@ -48,6 +48,8 @@ public final class ScanIndex {
             break
         }
 
+        if listing.partial { folders[id].flags.insert(.partial) }
+
         var newFolders: [FolderID] = []
         var direct: UInt64 = 0
         folders[id].firstChildFolder = FolderID(folders.count)
@@ -56,6 +58,8 @@ public final class ScanIndex {
         for entry in listing.entries {
             if entry.kind == .directory {
                 guard shouldDescend(entryDevice: entry.device, rootDevice: rootDevice, isMountPoint: entry.isMountPoint) else { continue }
+                // Directory hard links (HFS+ Time Machine backups): walk each once.
+                if entry.linkCount > 1, !seenHardLinks.insert(entry.inode).inserted { continue }
                 newFolders.append(FolderID(folders.count))
                 folders.append(FolderRecord(parent: listing.folder, nameOffset: folderNames.append(entry.name)))
                 continue
