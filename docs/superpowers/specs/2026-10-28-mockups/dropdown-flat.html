@@ -1,0 +1,110 @@
+<style>
+  .pair{display:flex;gap:28px;flex-wrap:wrap;justify-content:center;margin-top:14px}
+  .stage{border-radius:12px;padding:0 0 28px;width:400px;overflow:hidden}
+  .stage.d{background:#24222E}.stage.l{background:#E6E7EC}
+
+  .mb{height:26px;display:flex;align-items:center;justify-content:flex-end;gap:16px;padding:0 12px;font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+  .d .mb{background:rgba(0,0,0,.35);color:#eee}.l .mb{background:rgba(255,255,255,.55);color:#111}
+  .mb .o{opacity:.55}
+  .mb .me{display:flex;align-items:center;gap:6px;padding:2px 7px;border-radius:5px;font-variant-numeric:tabular-nums;font-weight:500}
+  .d .mb .me{background:rgba(255,255,255,.2)}.l .mb .me{background:rgba(0,0,0,.1)}
+  .ring{width:13px;height:13px;border-radius:50%;background:conic-gradient(currentColor 0 92%,transparent 92% 100%);-webkit-mask:radial-gradient(circle,transparent 3.5px,#000 4px);mask:radial-gradient(circle,transparent 3.5px,#000 4px);opacity:.9}
+
+  .pop{margin:6px 14px 0 auto;width:340px;border-radius:10px;font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;overflow:hidden}
+  .d .pop{--fg:#F2F1F7;--fg2:rgba(242,241,247,.56);--line:rgba(255,255,255,.08);--chip:rgba(255,255,255,.07);background:#2B2936;color:var(--fg);box-shadow:0 0 0 .5px rgba(255,255,255,.14) inset,0 0 0 .5px #000,0 16px 40px rgba(0,0,0,.45)}
+  .l .pop{--fg:#16161D;--fg2:rgba(22,22,29,.55);--line:rgba(20,20,40,.08);--chip:rgba(20,20,40,.05);background:#FAFAFC;color:var(--fg);box-shadow:0 0 0 .5px rgba(20,20,40,.14),0 14px 36px rgba(40,40,90,.2)}
+  .sec{padding:12px 14px;border-top:.5px solid var(--line)}
+  .sec:first-child{border-top:none}
+
+  .drives{display:flex;gap:4px;padding:8px 8px 0}
+  .drives span{padding:5px 9px;border-radius:6px;color:var(--fg2);display:flex;align-items:center;gap:6px}
+  .drives i{width:8px;height:8px;border-radius:2px}
+  .drives .on{background:var(--chip);color:var(--fg);font-weight:600}
+
+  .free{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:9px}
+  .free b{white-space:nowrap;font-size:22px;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .free span{color:var(--fg2);font-size:12px}
+  .disk{height:12px;display:flex;gap:1.5px;border-radius:3px;overflow:hidden}
+  .disk i{display:block;height:100%}
+  .purge{background:repeating-linear-gradient(90deg,var(--fg2) 0 1px,transparent 1px 3px);opacity:.55}
+  .empty{background:var(--chip);flex:1}
+  .key{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:9px;color:var(--fg2);font-size:11.5px}
+  .key span{display:flex;align-items:center;gap:5px}.key i{width:8px;height:8px;border-radius:2px}
+
+  .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+  .head b{font-weight:600}
+  .seg{display:flex;background:var(--chip);border-radius:6px;padding:2px;font-size:11.5px}
+  .seg span{padding:2px 8px;border-radius:4px;color:var(--fg2)}
+  .seg .on{background:var(--fg);color:var(--bgc,#2B2936);font-weight:600}
+  .l .seg .on{--bgc:#FAFAFC}
+  .r{display:grid;grid-template-columns:8px 1fr auto;gap:10px;align-items:center;padding:6px 0}
+  .r .sw{width:8px;height:8px;border-radius:2px}
+  .r .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .r .n small{color:var(--fg2);margin-left:6px}
+  .r .v{font-variant-numeric:tabular-nums;font-weight:600}
+  .up{color:#E8805F}.dn{color:#3FA67F}
+  .tot{display:flex;justify-content:space-between;color:var(--fg2);font-size:12px;padding-top:6px;margin-top:4px;border-top:.5px solid var(--line)}
+
+  .acts{display:flex;gap:8px}
+  .b{flex:1;text-align:center;padding:6px 0;border-radius:6px;font-weight:600;background:var(--chip)}
+  .b.p{background:var(--fg);color:#2B2936}.l .b.p{color:#FAFAFC}
+  .foot{display:flex;justify-content:space-between;color:var(--fg2);font-size:11.5px;padding:8px 14px;border-top:.5px solid var(--line)}
+</style>
+
+<h2>Menu bar dropdown, flat style</h2>
+<p class="subtitle">Same colors as the map, so the dropdown and the full window read as one thing. Dark and light shown.</p>
+
+<div class="pair">
+
+  <div class="stage d">
+    <div class="mb"><span class="o">⌕</span><span class="o">Wi‑Fi</span><span class="me"><i class="ring"></i>82 GB</span><span class="o">Wed 06:38</span></div>
+    <div class="pop">
+      <div class="drives"><span class="on"><i style="background:#8B7BFF"></i>Macintosh HD</span><span><i style="background:#0FA39B"></i>Samsung T7</span></div>
+      <div class="sec">
+        <div class="free"><b>82 GB free</b><span>of 994 GB, 61 GB more reclaimable</span></div>
+        <div class="disk">
+          <i style="width:31%;background:#3E9E7A"></i><i style="width:14%;background:#2E9FC4"></i><i style="width:12%;background:#7A5FD6"></i><i style="width:9%;background:#D45C7E"></i><i style="width:8%;background:#4C7CE0"></i><i style="width:5%;background:#D9893A"></i><i style="width:6%;background:#6B7183"></i><i class="purge" style="width:6%"></i><i class="empty"></i>
+        </div>
+        <div class="key"><span><i style="background:#3E9E7A"></i>App data</span><span><i style="background:#2E9FC4"></i>VMs</span><span><i style="background:#7A5FD6"></i>Developer</span><span><i style="background:#D45C7E"></i>Media</span><span><i style="background:#4C7CE0"></i>Apps</span><span><i style="background:#6B7183"></i>Caches</span><span><i class="purge" style="opacity:1"></i>Reclaimable</span></div>
+      </div>
+      <div class="sec">
+        <div class="head"><b>What changed</b><div class="seg"><span class="on">Today</span><span>7 days</span><span>30 days</span></div></div>
+        <div class="r"><i class="sw" style="background:#2E9FC4"></i><span class="n">Docker.raw <small>Library</small></span><span class="v up">+8.1 GB</span></div>
+        <div class="r"><i class="sw" style="background:#7A5FD6"></i><span class="n">DerivedData <small>Xcode</small></span><span class="v up">+4.4 GB</span></div>
+        <div class="r"><i class="sw" style="background:#D9893A"></i><span class="n">Downloads</span><span class="v up">+2.3 GB</span></div>
+        <div class="r"><i class="sw" style="background:#6B7183"></i><span class="n">Trash emptied</span><span class="v dn">−0.6 GB</span></div>
+        <div class="tot"><span>Net today</span><span class="up">−14.2 GB free</span></div>
+      </div>
+      <div class="sec">
+        <div class="acts"><span class="b">Open map</span><span class="b p">Review 9.2 GB to clear</span></div>
+      </div>
+      <div class="foot"><span>Updated 2 min ago</span><span>Settings ⌘,</span></div>
+    </div>
+  </div>
+
+  <div class="stage l">
+    <div class="mb"><span class="o">⌕</span><span class="o">Wi‑Fi</span><span class="me"><i class="ring" style="background:conic-gradient(currentColor 0 66%,transparent 66% 100%)"></i>212 GB</span><span class="o">Wed 06:38</span></div>
+    <div class="pop">
+      <div class="drives"><span><i style="background:#8B7BFF"></i>Macintosh HD</span><span class="on"><i style="background:#0FA39B"></i>Samsung T7</span></div>
+      <div class="sec">
+        <div class="free"><b>212 GB free</b><span>of 1 TB</span></div>
+        <div class="disk">
+          <i style="width:52%;background:#D45C7E"></i><i style="width:7%;background:#2E9FC4"></i><i style="width:6%;background:#D9893A"></i><i style="width:5%;background:#6B7183"></i><i class="empty"></i>
+        </div>
+        <div class="key"><span><i style="background:#D45C7E"></i>Media</span><span><i style="background:#2E9FC4"></i>Proxies</span><span><i style="background:#D9893A"></i>Exports</span><span><i style="background:#6B7183"></i>Render cache</span></div>
+      </div>
+      <div class="sec">
+        <div class="head"><b>What changed</b><div class="seg"><span>Today</span><span class="on">7 days</span><span>30 days</span></div></div>
+        <div class="r"><i class="sw" style="background:#D45C7E"></i><span class="n">Client shoot, Sept <small>Footage</small></span><span class="v up">+166 GB</span></div>
+        <div class="r"><i class="sw" style="background:#2E9FC4"></i><span class="n">Proxies</span><span class="v up">+31 GB</span></div>
+        <div class="r"><i class="sw" style="background:#6B7183"></i><span class="n">Render cache</span><span class="v dn">−12 GB</span></div>
+        <div class="tot"><span>Net this week</span><span class="up">−185 GB free</span></div>
+      </div>
+      <div class="sec">
+        <div class="acts"><span class="b">Open map</span><span class="b p">Review 125 GB to clear</span></div>
+      </div>
+      <div class="foot"><span>Connected 40 min ago</span><span>Eject</span></div>
+    </div>
+  </div>
+
+</div>

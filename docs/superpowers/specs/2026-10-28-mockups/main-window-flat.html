@@ -1,0 +1,170 @@
+<style>
+  .stage{border-radius:16px;padding:34px 30px;position:relative;overflow:hidden;margin:14px 0 30px}
+  .stage.darkbg{background:#24222E}
+  .stage.lightbg{background:#E6E7EC}
+
+  .w{border-radius:10px;overflow:hidden;font:13px -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;position:relative}
+  .w.dark{--bg:rgba(28,26,38,.72);--line:rgba(255,255,255,.08);--fg:#F2F1F7;--fg2:rgba(242,241,247,.58);--chip:rgba(255,255,255,.07);--tint:#8B7BFF;
+    background:var(--bg);color:var(--fg);backdrop-filter:blur(40px) saturate(1.6);-webkit-backdrop-filter:blur(40px) saturate(1.6);
+    box-shadow:0 0 0 .5px rgba(255,255,255,.18) inset,0 30px 80px rgba(0,0,0,.45),0 0 0 .5px rgba(0,0,0,.6)}
+  .w.light{--bg:rgba(250,250,253,.78);--line:rgba(20,20,40,.08);--fg:#16161D;--fg2:rgba(22,22,29,.55);--chip:rgba(20,20,40,.05);--tint:#5B4BE0;
+    background:var(--bg);color:var(--fg);backdrop-filter:blur(40px) saturate(1.8);-webkit-backdrop-filter:blur(40px) saturate(1.8);
+    box-shadow:0 0 0 .5px rgba(255,255,255,.9) inset,0 24px 70px rgba(40,40,90,.22),0 0 0 .5px rgba(20,20,40,.12)}
+
+  .tb{height:48px;display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:.5px solid var(--line)}
+  .lights{display:flex;gap:8px;margin-right:6px}.lights i{width:12px;height:12px;border-radius:50%;display:block}
+  .drive{display:flex;align-items:center;gap:7px;padding:5px 10px 5px 6px;border-radius:6px;background:color-mix(in srgb,var(--tint) 22%,transparent);font-weight:600}
+  .drive .ic{width:20px;height:20px;border-radius:5px;background:var(--tint);display:grid;place-items:center;color:#fff;font-size:11px}
+  .drive small{font-weight:500;color:var(--fg2)}
+  .crumbs{display:flex;align-items:center;gap:2px;color:var(--fg2)}
+  .crumbs span{padding:4px 7px;border-radius:5px}
+  .crumbs .cur{color:var(--fg);font-weight:600;background:var(--chip)}
+  .search{margin-left:auto;display:flex;align-items:center;gap:8px;width:260px;padding:6px 10px;border-radius:6px;background:var(--chip);color:var(--fg2)}
+  .search kbd,.ab kbd{font:500 11px -apple-system,system-ui;padding:1px 6px;border-radius:5px;background:var(--chip);border:.5px solid var(--line);color:var(--fg2)}
+
+  .body{display:grid;grid-template-columns:1fr 250px;height:360px}
+  .map{position:relative;margin:10px}
+  .map .b{position:absolute;border-radius:4px;padding:10px 12px;color:#fff;overflow:hidden;transition:transform .2s}
+  .map .n{font-weight:650;font-size:13px;letter-spacing:-.01em;position:relative}
+  .map .s{font-size:12px;opacity:.8;position:relative;font-variant-numeric:tabular-nums}
+  .map .xl .n{font-size:17px}.map .xl .s{font-size:13px}
+  .map .dim{filter:saturate(.7) brightness(.78)}
+  .map .hot{box-shadow:inset 0 0 0 2px #fff;z-index:3}
+  .grew{margin-top:4px;font-size:12px;font-weight:600;position:relative}
+  .new{position:absolute;top:0;right:0;bottom:0;background:repeating-linear-gradient(90deg,rgba(255,255,255,.34) 0 1px,rgba(255,255,255,.16) 1px 3px);border-left:1px solid rgba(255,255,255,.7)}
+
+  .tip{position:absolute;z-index:6;left:49%;top:34%;width:236px;border-radius:8px;padding:12px;background:var(--bg);backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px);color:var(--fg);box-shadow:0 0 0 .5px var(--line),0 16px 40px rgba(0,0,0,.3)}
+  .tip .h{display:flex;align-items:center;gap:9px;margin-bottom:6px}
+  .tip .ico{width:28px;height:28px;border-radius:6px;background:#2E9FC4;display:grid;place-items:center;font-size:15px}
+  .tip .t{font-weight:650}.tip .p{color:var(--fg2);font-size:12px}
+  .tip .d{font-size:12px;line-height:1.45;color:var(--fg2)}
+  .tip .up{color:#FF8E6E;font-weight:600}
+
+  .basket{position:absolute;z-index:5;left:50%;bottom:14px;transform:translateX(-50%);display:flex;align-items:center;gap:12px;padding:7px 8px 7px 14px;border-radius:8px;background:#1E1C27;color:#fff;box-shadow:0 0 0 .5px rgba(255,255,255,.14) inset,0 8px 24px rgba(0,0,0,.3);white-space:nowrap}
+  .basket .stack{display:flex}.basket .stack i{width:16px;height:16px;border-radius:3px;margin-left:-6px;box-shadow:0 0 0 1.5px rgba(20,18,30,.9)}
+  .basket b{font-variant-numeric:tabular-nums}
+  .basket .go{background:#fff;color:#16161D;padding:4px 11px;border-radius:5px;font-weight:600}
+
+  .list{border-left:.5px solid var(--line);padding:10px 8px;overflow:hidden}
+  .list .hd{padding:4px 8px 8px;color:var(--fg2);font-size:12px;display:flex;justify-content:space-between}
+  .row{display:grid;grid-template-columns:18px 1fr auto;align-items:center;gap:9px;padding:7px 8px;border-radius:5px}
+  .row .sw{width:10px;height:10px;border-radius:2px}
+  .row .sz{font-variant-numeric:tabular-nums;color:var(--fg2)}
+  .row .bar{grid-column:2 / 4;height:3px;border-radius:2px;background:var(--chip);margin-top:-2px;overflow:hidden}
+  .row .bar i{display:block;height:100%;border-radius:2px}
+  .row.sel{background:color-mix(in srgb,var(--tint) 26%,transparent)}
+  .row.sel .sz{color:var(--fg)}
+
+  .ab{height:40px;display:flex;align-items:center;gap:16px;padding:0 14px;border-top:.5px solid var(--line);color:var(--fg2);font-size:12px}
+  .ab .sel{color:var(--fg);font-weight:600;display:flex;align-items:center;gap:8px}
+  .ab .sel i{width:10px;height:10px;border-radius:2px;background:#2E9FC4}
+  .ab .sp{flex:1}
+  .ab span.k{display:flex;align-items:center;gap:6px}
+  .ab .act{color:var(--fg)}
+
+  /* palette by kind */
+  .k-apps{background:#4C7CE0}
+  .k-vm{background:#2E9FC4}
+  .k-dev{background:#7A5FD6}
+  .k-cache{background:#6B7183}
+  .k-sup{background:#3E9E7A}
+  .k-mail{background:#D9893A}
+  .k-media{background:#D45C7E}
+  .k-small{background:rgba(150,150,170,.22)}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--fg2);font-size:12px;margin-top:10px}
+  .legend span{display:flex;align-items:center;gap:6px}.legend i{width:10px;height:10px;border-radius:3px}
+</style>
+
+<h2>Modern pass, flat</h2>
+<p class="subtitle">Solid fills, 4px corners, 2px gutters, no glow. One expressive detail: the fine-ruled strip on a block's edge is the part that's new since yesterday, drawn to scale.</p>
+
+<div class="stage darkbg">
+  <div class="w dark">
+    <div class="tb">
+      <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+      <div class="drive"><span class="ic">◐</span>Macintosh HD <small>82 GB free</small></div>
+      <div class="crumbs"><span>Users</span>›<span>uzair</span>›<span class="cur">Library</span></div>
+      <div class="search">⌕ Search files or type a command <span style="flex:1"></span><kbd>⌘K</kbd></div>
+    </div>
+    <div class="body">
+      <div class="map">
+        <div class="b k-sup dim xl" style="left:0;top:0;width:calc(46% - 3px);height:calc(62% - 3px)"><div class="n">Containers</div><div class="s">118 GB</div></div>
+        <div class="b k-vm hot xl" style="left:46%;top:0;width:54%;height:calc(38% - 3px)"><div class="n">Docker</div><div class="s">92 GB</div><div class="grew">+8.1 GB today</div><div class="new" style="width:9%"></div></div>
+        <div class="b k-dev dim" style="left:46%;top:38%;width:calc(30% - 3px);height:calc(24% - 3px)"><div class="n">Developer</div><div class="s">41 GB</div></div>
+        <div class="b k-cache dim" style="left:76%;top:38%;width:24%;height:calc(24% - 3px)"><div class="n">Caches</div><div class="s">18 GB</div></div>
+        <div class="b k-apps dim" style="left:0;top:62%;width:calc(28% - 3px);height:38%"><div class="n">Application Support</div><div class="s">27 GB</div></div>
+        <div class="b k-mail dim" style="left:28%;top:62%;width:calc(22% - 3px);height:38%"><div class="n">Mail</div><div class="s">14 GB</div></div>
+        <div class="b k-media dim" style="left:50%;top:62%;width:calc(18% - 3px);height:38%"><div class="n">Photos</div><div class="s">9 GB</div></div>
+        <div class="b k-small" style="left:68%;top:62%;width:32%;height:38%;color:var(--fg)"><div class="n">3,912 small files</div><div class="s">6 GB</div></div>
+
+        <div class="tip">
+          <div class="h"><div class="ico">🐳</div><div><div class="t">Docker.raw</div><div class="p">92 GB, <span class="up">up 8.1 GB today</span></div></div></div>
+          <div class="d">The virtual disk Docker runs on. It grows but never shrinks by itself. Reclaim space in Docker › Settings › Resources.</div>
+        </div>
+
+        <div class="basket">
+          <div class="stack"><i style="background:#7A5FD6"></i><i style="background:#D9893A"></i><i style="background:#6B7183"></i></div>
+          3 items, <b>11.4 GB</b>
+          <span class="go">Review</span>
+        </div>
+      </div>
+      <div class="list">
+        <div class="hd"><span>Library</span><span>325 GB</span></div>
+        <div class="row"><i class="sw k-sup"></i><span>Containers</span><span class="sz">118 GB</span><div class="bar"><i class="k-sup" style="width:100%"></i></div></div>
+        <div class="row sel"><i class="sw k-vm"></i><span>Docker</span><span class="sz">92 GB</span><div class="bar"><i class="k-vm" style="width:78%"></i></div></div>
+        <div class="row"><i class="sw k-dev"></i><span>Developer</span><span class="sz">41 GB</span><div class="bar"><i class="k-dev" style="width:35%"></i></div></div>
+        <div class="row"><i class="sw k-apps"></i><span>Application Support</span><span class="sz">27 GB</span><div class="bar"><i class="k-apps" style="width:23%"></i></div></div>
+        <div class="row"><i class="sw k-cache"></i><span>Caches</span><span class="sz">18 GB</span><div class="bar"><i class="k-cache" style="width:15%"></i></div></div>
+        <div class="row"><i class="sw k-mail"></i><span>Mail</span><span class="sz">14 GB</span><div class="bar"><i class="k-mail" style="width:12%"></i></div></div>
+      </div>
+    </div>
+    <div class="ab">
+      <span class="sel"><i></i>Docker.raw</span>
+      <span class="sp"></span>
+      <span class="k act">Zoom in <kbd>↵</kbd></span>
+      <span class="k">Quick Look <kbd>Space</kbd></span>
+      <span class="k">Add to basket <kbd>⌫</kbd></span>
+      <span class="k">Actions <kbd>⌘K</kbd></span>
+    </div>
+  </div>
+  <div class="legend" style="--fg2:rgba(255,255,255,.7)">
+    <span><i class="k-apps"></i>Apps</span><span><i class="k-dev"></i>Developer</span><span><i class="k-vm"></i>Virtual machines</span><span><i class="k-media"></i>Photos and video</span><span><i class="k-mail"></i>Mail and documents</span><span><i class="k-sup"></i>App data</span><span><i class="k-cache"></i>Caches</span>
+  </div>
+</div>
+
+<div class="stage lightbg">
+  <div class="w light" style="--tint:#0FA39B">
+    <div class="tb">
+      <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+      <div class="drive"><span class="ic">▤</span>Samsung T7 <small>212 GB free</small></div>
+      <div class="crumbs"><span>Footage</span>›<span class="cur">2026</span></div>
+      <div class="search">⌕ Search files or type a command <span style="flex:1"></span><kbd>⌘K</kbd></div>
+    </div>
+    <div class="body">
+      <div class="map">
+        <div class="b k-media xl" style="left:0;top:0;width:calc(58% - 3px);height:calc(70% - 3px)"><div class="n">Lahore trip</div><div class="s">284 GB</div></div>
+        <div class="b k-media" style="left:58%;top:0;width:42%;height:calc(45% - 3px);background:#B9506F"><div class="n">Client shoot, Sept</div><div class="s">166 GB</div></div>
+        <div class="b k-vm hot" style="left:58%;top:45%;width:42%;height:calc(25% - 3px)"><div class="n">Proxies</div><div class="s">74 GB</div><div class="grew">Safe to clear. Rebuilds itself.</div></div>
+        <div class="b k-mail" style="left:0;top:70%;width:calc(34% - 3px);height:30%"><div class="n">Exports</div><div class="s">58 GB</div></div>
+        <div class="b k-cache" style="left:34%;top:70%;width:calc(36% - 3px);height:30%"><div class="n">Render cache</div><div class="s">51 GB</div></div>
+        <div class="b k-small" style="left:70%;top:70%;width:30%;height:30%;color:var(--fg)"><div class="n">812 small files</div><div class="s">3 GB</div></div>
+      </div>
+      <div class="list">
+        <div class="hd"><span>2026</span><span>636 GB</span></div>
+        <div class="row"><i class="sw k-media"></i><span>Lahore trip</span><span class="sz">284 GB</span><div class="bar"><i class="k-media" style="width:100%"></i></div></div>
+        <div class="row"><i class="sw k-media"></i><span>Client shoot, Sept</span><span class="sz">166 GB</span><div class="bar"><i class="k-media" style="width:58%"></i></div></div>
+        <div class="row sel"><i class="sw k-vm"></i><span>Proxies</span><span class="sz">74 GB</span><div class="bar"><i class="k-vm" style="width:26%"></i></div></div>
+        <div class="row"><i class="sw k-mail"></i><span>Exports</span><span class="sz">58 GB</span><div class="bar"><i class="k-mail" style="width:20%"></i></div></div>
+        <div class="row"><i class="sw k-cache"></i><span>Render cache</span><span class="sz">51 GB</span><div class="bar"><i class="k-cache" style="width:18%"></i></div></div>
+      </div>
+    </div>
+    <div class="ab">
+      <span class="sel"><i style="background:#2E9FC4"></i>Proxies</span>
+      <span class="sp"></span>
+      <span class="k act">Zoom in <kbd>↵</kbd></span>
+      <span class="k">Quick Look <kbd>Space</kbd></span>
+      <span class="k">Add to basket <kbd>⌫</kbd></span>
+      <span class="k">Actions <kbd>⌘K</kbd></span>
+    </div>
+  </div>
+</div>
