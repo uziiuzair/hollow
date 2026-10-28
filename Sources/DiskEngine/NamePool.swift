@@ -1,9 +1,13 @@
 /// Append-only store of names. Each entry is a little-endian UInt16 byte length
 /// followed by the UTF-8 bytes.
 public struct NamePool: Sendable {
-    private var bytes: [UInt8] = []
+    public private(set) var bytes: [UInt8] = []
 
     public init() {}
+
+    public init(bytes: [UInt8]) {
+        self.bytes = bytes
+    }
 
     public var byteCount: Int { bytes.count }
 

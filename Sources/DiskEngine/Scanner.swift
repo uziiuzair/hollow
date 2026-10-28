@@ -45,6 +45,8 @@ public final class DiskScanner: Sendable {
         let rootDevice = info.st_dev
 
         let index = try ScanIndex(rootName: root.lastPathComponent, storage: storage)
+        index.rootPath = rootPath
+        index.rootDevice = rootDevice
         var pending: [FolderID] = [0]
         var head = 0
         var stats = ScanProgress(foldersDone: 0, filesSeen: 0, bytesSeen: 0)

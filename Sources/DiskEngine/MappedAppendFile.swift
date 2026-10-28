@@ -18,9 +18,21 @@ final class MappedAppendFile {
     private var map: UnsafeMutableRawPointer?
     private var mappedLength: Int = 0
 
-    init(url: URL) throws {
-        fd = open(url.path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0o600)
+    convenience init(url: URL) throws {
+        try self.init(url: url, keepingFirst: 0)
+    }
+
+    /// Opens an existing file (or creates one) and cuts it to `length` bytes, dropping
+    /// anything written after the last committed length.
+    init(url: URL, keepingFirst length: UInt64) throws {
+        fd = open(url.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw DiskEngineError.posix("open \(url.path)", errno) }
+        guard ftruncate(fd, off_t(length)) == 0 else {
+            let failure = errno
+            close(fd)
+            throw DiskEngineError.posix("ftruncate \(url.path)", failure)
+        }
+        flushedLength = length
         buffer.reserveCapacity(Self.bufferCapacity)
     }
 
@@ -47,6 +59,12 @@ final class MappedAppendFile {
         guard !buffer.isEmpty else { return }
         try buffer.withUnsafeBytes { try write($0) }
         buffer.removeAll(keepingCapacity: true)
+    }
+
+    /// Flushes and forces the data to stable storage.
+    func sync() throws {
+        try flush()
+        guard fcntl(fd, F_FULLFSYNC) == 0 || fsync(fd) == 0 else { throw DiskEngineError.posix("fsync", errno) }
     }
 
     func withMappedBytes<R>(_ body: (UnsafeRawBufferPointer) throws -> R) throws -> R {

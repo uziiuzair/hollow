@@ -11,11 +11,24 @@ public func shouldDescend(entryDevice: Int32, rootDevice: Int32, isMountPoint: B
 public final class ScanIndex {
     public static let bigFileThreshold: UInt64 = 1_048_576
 
-    public private(set) var folders = PagedArray<FolderRecord>()
+    public internal(set) var folders = PagedArray<FolderRecord>()
     public let files: FileTable
-    public private(set) var top = TopFiles()
-    private var folderNames = NamePool()
-    private var seenHardLinks: Set<UInt64> = []
+    public internal(set) var top = TopFiles()
+    var folderNames = NamePool()
+    var seenHardLinks: Set<UInt64> = []
+
+    /// The scanned folder's real path (symlinks resolved).
+    public var rootPath = ""
+    public var rootDevice: Int32 = 0
+    /// Folders created but never listed; a resumed scan starts from these.
+    public var pending: [FolderID] = []
+    /// Last FSEvents event applied to this index; 0 = none.
+    public var lastEventID: UInt64 = 0
+    /// The volume's FSEvents journal UUID when this index was last current.
+    public var fseventsUUID: String?
+    public internal(set) var garbageFolders = 0
+    public internal(set) var garbageFiles = 0
+    public var scannedAt = Date()
 
     public enum ChildKind: Sendable {
         case folder(FolderID)
@@ -32,6 +45,11 @@ public final class ScanIndex {
     public init(rootName: String, storage: URL) throws {
         files = try FileTable(directory: storage)
         folders.append(FolderRecord(parent: noFolder, nameOffset: folderNames.append(rootName)))
+    }
+
+    /// Used by `load(from:)`; the caller fills in every table.
+    init(files: FileTable) {
+        self.files = files
     }
 
     /// Records one directory listing and returns the new subfolders to scan.
