@@ -65,6 +65,26 @@ extension ScanIndex {
         }
     }
 
+    /// Every stored ID and offset must point inside its table, or the snapshot is rejected.
+    private static func validate(_ index: ScanIndex, fileCount: Int) throws {
+        let count = UInt32(index.folders.count)
+        let nameBytes = index.folderNames.byteCount
+        func folderOK(_ id: FolderID) -> Bool { id == noFolder || id < count }
+        for (i, f) in index.folders.enumerated() {
+            guard (i == 0 ? f.parent == noFolder : f.parent < count),
+                  folderOK(f.firstChildFolder), folderOK(f.nextSibling),
+                  Int(f.nameOffset) + 2 <= nameBytes,
+                  Int(f.firstFile) + Int(f.bigFileCount) <= fileCount
+            else { throw SnapshotError.incompatible("folder \(i) out of range") }
+            let offset = Int(f.nameOffset)
+            let length = Int(index.folderNames.bytes[offset]) | Int(index.folderNames.bytes[offset + 1]) << 8
+            guard offset + 2 + length <= nameBytes else { throw SnapshotError.incompatible("folder \(i) name out of range") }
+        }
+        guard index.pending.allSatisfy({ $0 < count }), index.hardLinkOwners.values.allSatisfy({ $0 < count }) else {
+            throw SnapshotError.incompatible("pending or hard-link owner out of range")
+        }
+    }
+
     public static func load(from directory: URL) throws -> ScanIndex {
         let url = directory.appending(path: snapshotName)
         guard FileManager.default.fileExists(atPath: url.path) else { throw SnapshotError.missing }
@@ -109,6 +129,13 @@ extension ScanIndex {
                 throw SnapshotError.incompatible("length mismatch")
             }
 
+            // A file table shorter than committed would be padded with zeros by ftruncate.
+            for (name, needed) in [("files.bin", UInt64(fileCount * MemoryLayout<FileRecord>.stride)), ("filenames.bin", fileNameBytes)] {
+                var info = stat()
+                guard stat(directory.appending(path: name).path, &info) == 0, UInt64(info.st_size) >= needed else {
+                    throw SnapshotError.incompatible("\(name) shorter than committed")
+                }
+            }
             let files = try FileTable(directory: directory, keepingRecords: fileCount, nameBytes: fileNameBytes)
             let index = ScanIndex(files: files)
             for _ in 0..<folderCount { index.folders.append(try take(FolderRecord.self)) }
@@ -120,6 +147,7 @@ extension ScanIndex {
             }
             index.pending = (0..<pendingCount).map { _ in (try? take(FolderID.self)) ?? 0 }
 
+            try validate(index, fileCount: fileCount)
             index.rootPath = rootPath
             index.rootDevice = rootDevice
             index.lastEventID = lastEventID

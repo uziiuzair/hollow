@@ -23,7 +23,8 @@ private let GB: UInt64 = 1_000_000_000
 @Test func freedSpaceIsNegative() {
     let old = SizeSnapshot(sizes: ["": 100 * GB, "Trash": 2 * GB])
     let new = SizeSnapshot(sizes: ["": 98 * GB])
-    #expect(ChangeReport.changes(from: old, to: new) == [Change(path: "Trash", delta: -2_000_000_000)])
+    // Gone from the new snapshot means "below 100 MB", so the reported drop is conservative.
+    #expect(ChangeReport.changes(from: old, to: new) == [Change(path: "Trash", delta: -1_900_000_001)])
 }
 
 @Test func noChangeNoReport() {

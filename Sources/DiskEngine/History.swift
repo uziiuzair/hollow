@@ -7,19 +7,27 @@ public struct SizeSnapshot: Codable, Sendable, Equatable {
     public static let fileFloor: UInt64 = 500_000_000
 
     public var sizes: [String: UInt64]
+    /// Keys that are files (their floor is `fileFloor`); the rest are folders.
+    public var files: Set<String>
 
-    public init(sizes: [String: UInt64]) {
+    public init(sizes: [String: UInt64], files: Set<String> = []) {
         self.sizes = sizes
+        self.files = files
     }
 
     public static func capture(_ index: ScanIndex) throws -> SizeSnapshot {
         var sizes: [String: UInt64] = ["": index.folders[0].totalAllocated]
+        var files: Set<String> = []
         var stack: [(FolderID, String)] = [(0, "")]
         while let (folder, path) = stack.popLast() {
             let record = index.folders[Int(folder)]
             for file in record.firstFile..<(record.firstFile + record.bigFileCount) {
                 let allocated = try index.files.record(file).allocated
-                if allocated >= fileFloor { sizes[join(path, try index.files.name(file))] = allocated }
+                if allocated >= fileFloor {
+                    let filePath = join(path, try index.files.name(file))
+                    sizes[filePath] = allocated
+                    files.insert(filePath)
+                }
             }
             var child = record.firstChildFolder
             while child != noFolder {
@@ -32,7 +40,7 @@ public struct SizeSnapshot: Codable, Sendable, Equatable {
                 child = index.folders[Int(child)].nextSibling
             }
         }
-        return SizeSnapshot(sizes: sizes)
+        return SizeSnapshot(sizes: sizes, files: files)
     }
 
     private static func join(_ parent: String, _ name: String) -> String {
@@ -86,7 +94,7 @@ public final class HistoryStore {
 
     private enum Entry: Codable {
         case key(SizeSnapshot)
-        case delta(changed: [String: UInt64], removed: [String])
+        case delta(changed: [String: UInt64], removed: [String], files: Set<String>)
     }
 
     private let directory: URL
@@ -149,7 +157,7 @@ public final class HistoryStore {
         }
         let changed = snapshot.sizes.filter { base.sizes[$0.key] != $0.value }
         let removed = base.sizes.keys.filter { snapshot.sizes[$0] == nil }
-        try save(.delta(changed: changed, removed: Array(removed)), on: day)
+        try save(.delta(changed: changed, removed: Array(removed), files: snapshot.files), on: day)
     }
 
     private func reconstruct(_ day: Day, from all: [Day]) throws -> SizeSnapshot? {
@@ -157,9 +165,10 @@ public final class HistoryStore {
         guard let keyIndex = try chain.lastIndex(where: { if case .key = try read($0) { true } else { false } }) else { return nil }
         guard case .key(var snapshot) = try read(chain[keyIndex]) else { return nil }
         for later in chain[(keyIndex + 1)...] {
-            if case .delta(let changed, let removed) = try read(later) {
+            if case .delta(let changed, let removed, let files) = try read(later) {
                 snapshot.sizes.merge(changed) { $1 }
                 for key in removed { snapshot.sizes[key] = nil }
+                snapshot.files = files
             }
         }
         return snapshot

@@ -17,6 +17,8 @@ final class MappedAppendFile {
     private var flushedLength: UInt64 = 0
     private var map: UnsafeMutableRawPointer?
     private var mappedLength: Int = 0
+    /// The write call; replaceable in tests to simulate a full disk.
+    var writer: (Int32, UnsafeRawPointer, Int, off_t) -> Int = { pwrite($0, $1, $2, $3) }
 
     convenience init(url: URL) throws {
         try self.init(url: url, keepingFirst: 0)
@@ -84,13 +86,19 @@ final class MappedAppendFile {
         return try body(UnsafeRawBufferPointer(start: map, count: mappedLength))
     }
 
+    /// Writes all of `bytes` at the end, or nothing: on failure the file is cut back
+    /// to its previous length so a retry writes at the same offset.
     private func write(_ bytes: UnsafeRawBufferPointer) throws {
+        let start = flushedLength
         var done = 0
         while done < bytes.count {
-            let n = pwrite(fd, bytes.baseAddress! + done, bytes.count - done, off_t(flushedLength))
+            let n = writer(fd, bytes.baseAddress! + done, bytes.count - done, off_t(flushedLength))
             if n < 0 {
                 if errno == EINTR { continue }
-                throw DiskEngineError.posix("pwrite", errno)
+                let failure = errno
+                ftruncate(fd, off_t(start))
+                flushedLength = start
+                throw DiskEngineError.posix("pwrite", failure)
             }
             done += n
             flushedLength += UInt64(n)

@@ -26,6 +26,9 @@ public actor LiveIndex {
     // Index work suspends inside scans; this keeps a second apply or save from running
     // in between (actor reentrancy).
     private var closed = false
+    /// Set when an apply failed part-way: the index can't be trusted until a full rescan.
+    private var needsFullRescan = false
+    private var fault: (@Sendable () throws -> Void)?
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -84,16 +87,19 @@ public actor LiveIndex {
             index = try await fullScan(device: device, journal: journal)
             opened = .fullScan(reason: reason)
         } else if let loaded, !loaded.pending.isEmpty {
+            loaded.rootDevice = device
             index = loaded
             try await scan(loaded, starting: loaded.pending)
             opened = .resumed
         } else {
+            // st_dev changes when a drive is replugged or after a reboot.
+            loaded?.rootDevice = device
             index = loaded
             opened = .snapshot
         }
 
         try startWatching(device: device)
-        try saveNow()
+        try saveLocked()
         return opened
     }
 
@@ -103,10 +109,26 @@ public actor LiveIndex {
         defer { unlock() }
         guard !closed, let index, !changes.isEmpty else { return }
         let maxID = changes.map(\.id).max() ?? index.lastEventID
+        do {
+            try await applyLocked(changes, to: index)
+        } catch {
+            // Part of the change may be in the index; drop the snapshot so a crash means a
+            // full rescan, and rescan on the next apply. The event ID stays put.
+            needsFullRescan = true
+            unlink(store.appending(path: ScanIndex.snapshotName).path)
+            throw error
+        }
+        // Advance only after the changes are in the index (spec 6.6).
+        index.lastEventID = max(index.lastEventID, maxID)
+        scheduleSave()
+    }
 
-        if changes.contains(where: \.historyLost) {
+    private func applyLocked(_ changes: [FSChange], to index: ScanIndex) async throws {
+        if needsFullRescan || changes.contains(where: \.historyLost) {
             index.resetContents(of: 0)
+            try fault?()
             try await scan(index, starting: [0])
+            needsFullRescan = false
         } else {
             var relists: Set<FolderID> = []
             var subtrees: Set<FolderID> = []
@@ -128,16 +150,25 @@ public actor LiveIndex {
                 let listing = reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder)
                 toScan += try index.relist(listing)
             }
+            try fault?()
             if !toScan.isEmpty { try await scan(index, starting: toScan) }
         }
-
-        // Advance only after the changes are in the index (spec 6.6).
-        index.lastEventID = max(index.lastEventID, maxID)
-        scheduleSave()
     }
 
-    public func saveNow() throws {
-        guard var current = index else { return }
+    /// Saves now (compacting first if needed), waiting for any apply in progress.
+    public func save() async throws {
+        await lock()
+        defer { unlock() }
+        try saveLocked()
+    }
+
+    /// Test hook: runs inside the next applies after the index has been changed.
+    func injectFault(_ fault: (@Sendable () throws -> Void)?) {
+        self.fault = fault
+    }
+
+    private func saveLocked() throws {
+        guard !needsFullRescan, var current = index else { return }
         if current.garbageRatio > compactAbove {
             let temp = store.appending(path: "compact.tmp")
             try? FileManager.default.removeItem(at: temp)
@@ -170,7 +201,7 @@ public actor LiveIndex {
         watcher = nil
         watchTask = nil
         saveTask = nil
-        try saveNow()
+        try saveLocked()
     }
 
     /// Records today's size snapshot and prunes old history (spec 6.4: once a day and at
@@ -188,8 +219,9 @@ public actor LiveIndex {
         defer { unlock() }
         guard let index else { return [] }
         let today = Day(now, calendar: .current)
-        let then = try history.snapshot(onOrBefore: today.adding(days: -days, calendar: .current))
-        return ChangeReport.changes(from: then ?? SizeSnapshot(sizes: [:]), to: try SizeSnapshot.capture(index))
+        // No history yet: nothing to compare against, rather than "everything grew".
+        guard let then = try history.snapshot(onOrBefore: today.adding(days: -days, calendar: .current)) else { return [] }
+        return ChangeReport.changes(from: then, to: try SizeSnapshot.capture(index))
     }
 
     public func withIndex<R: Sendable>(_ body: (ScanIndex) throws -> R) rethrows -> R {
@@ -260,7 +292,7 @@ public actor LiveIndex {
         defer { unlock() }
         saveTask = nil
         guard !closed else { return }
-        try? saveNow()
+        try? saveLocked()
     }
 
     private func lock() async {
