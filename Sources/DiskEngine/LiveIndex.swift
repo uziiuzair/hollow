@@ -50,7 +50,7 @@ public actor LiveIndex {
 
     public init(volumeRoot: URL, store: URL, saveDebounce: Duration = .seconds(30), compactAbove: Double = 0.25,
                 exclusions: Set<String> = []) {
-        self.exclusions = exclusions
+        self.exclusions = ExclusionPaths.normalized(exclusions)
         self.volumeRoot = volumeRoot
         self.store = store
         self.saveDebounce = saveDebounce
@@ -78,7 +78,7 @@ public actor LiveIndex {
     private func storedExclusions() -> Set<String> {
         guard let data = try? Data(contentsOf: store.appending(path: Self.exclusionsName)),
               let paths = try? JSONDecoder().decode([String].self, from: data) else { return [] }
-        return Set(paths)
+        return ExclusionPaths.normalized(Set(paths))
     }
 
     private func writeExclusions() throws {
@@ -106,7 +106,8 @@ public actor LiveIndex {
     }
 
     /// Changes the folders left out of the index. Relists only their parents; never a full scan.
-    public func setExclusions(_ paths: Set<String>) async throws {
+    public func setExclusions(_ requested: Set<String>) async throws {
+        let paths = ExclusionPaths.normalized(requested)
         await lock()
         defer { unlock() }
         guard !closed, let index, paths != exclusions else { return }
@@ -122,7 +123,7 @@ public actor LiveIndex {
             throw error
         }
         indexChanged()
-        try writeExclusions()
+        // exclusions.json follows the snapshot (saveLocked), so a crash before then reconciles again on reopen.
         scheduleSave()
     }
 
@@ -194,7 +195,6 @@ public actor LiveIndex {
 
         try startWatching(device: device)
         try saveLocked()
-        try writeExclusions()
         return opened
     }
 
@@ -294,6 +294,8 @@ public actor LiveIndex {
             indexChanged()
         }
         try current.save(to: store)
+        // After the snapshot: a crash between the two only costs one redundant, idempotent reconcile.
+        try writeExclusions()
     }
 
     public func close() async throws {
@@ -525,5 +527,15 @@ public actor LiveIndex {
 private extension String {
     func trimmingTrailingSlash() -> String {
         count > 1 && hasSuffix("/") ? String(dropLast()) : self
+    }
+}
+
+/// Exclusion paths are relative to the volume root: no leading or trailing "/", no "//", never empty.
+public enum ExclusionPaths {
+    public static func normalized(_ paths: Set<String>) -> Set<String> {
+        Set(paths.compactMap { path in
+            let joined = path.split(separator: "/", omittingEmptySubsequences: true).joined(separator: "/")
+            return joined.isEmpty ? nil : joined
+        })
     }
 }

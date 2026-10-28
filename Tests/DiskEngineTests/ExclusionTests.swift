@@ -46,3 +46,35 @@ import Testing
     #expect(await live.relistCount == 0)
     try await live.close()
 }
+
+@Test func exclusionChangeSurvivesACrashBeforeTheSnapshotSave() async throws {
+    let root = try Fixtures.tree(["a/keep/f.bin": 2_000_000, "a/skip/g.bin": 3_000_000]); let store = try Fixtures.tempDir()
+    let first = LiveIndex(volumeRoot: root, store: store)
+    _ = try await first.open()
+    try await first.setExclusions(["a/skip"])
+    // No save() or close(): the app died here.
+    let second = LiveIndex(volumeRoot: root, store: store, exclusions: ["a/skip"])
+    #expect(try await second.open() == .snapshot)
+    #expect(try await second.read { $0.folder(atRelativePath: "a/skip") } == nil)
+    #expect(try await second.read { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root.appending(path: "a/keep")))
+    try await second.close()
+    try await first.close()
+}
+
+@Test func exclusionPathsAreNormalized() async throws {
+    let root = try Fixtures.tree(["a/keep/f.bin": 2_000_000, "a/skip/g.bin": 3_000_000])
+    for spelling in ["a/skip/", "/a/skip", "a//skip"] {
+        let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir(), exclusions: [spelling, ""])
+        _ = try await live.open()
+        #expect(try await live.read { $0.folder(atRelativePath: "a/skip") } == nil)
+        #expect(try await live.read { $0.folder(atRelativePath: "a/keep") } != nil)
+        try await live.close()
+    }
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir())
+    _ = try await live.open()
+    try await live.setExclusions(["/a//skip/", ""])
+    #expect(try await live.read { $0.folder(atRelativePath: "a/skip") } == nil)
+    try await live.setExclusions([""])
+    #expect(try await live.read { $0.folder(atRelativePath: "a/skip") } != nil)
+    try await live.close()
+}

@@ -68,7 +68,7 @@ public final class DriveController: ObservableObject {
     public var hasJournal: Bool { EventWatcher.journalUUID(device: volume.device) != nil }
 
     public init(volume: VolumeInfo, store: URL, coolDown: Duration = .seconds(300), exclusions: Set<String> = []) {
-        self.exclusions = exclusions
+        self.exclusions = ExclusionPaths.normalized(exclusions)
         self.volume = volume
         self.store = store
         self.coolDown = coolDown
@@ -100,6 +100,7 @@ public final class DriveController: ObservableObject {
     /// Leaves these folders out of the index (relative paths). A cold drive picks them up on its next open;
     /// an open one relists their parents, then recounts at once.
     public func setExclusions(_ paths: Set<String>) async {
+        let paths = ExclusionPaths.normalized(paths)
         await run {
             guard paths != self.exclusions else { return }
             self.exclusions = paths
