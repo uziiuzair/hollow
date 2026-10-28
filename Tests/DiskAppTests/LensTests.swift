@@ -113,3 +113,25 @@ import DiskEngine
     #expect(LensRules.bundled.rule(covering: "Users/u/.vscode/extensions/x/node_modules") == nil)
     #expect(LensRules.bundled.rule(id: "davinci-cache")?.safety == .review)
 }
+
+// Final review I1: node_modules under system and Homebrew locations belong to tools, not projects. Paths are relative to the drive
+// root, so an external drive's own top-level `Library` is skipped too.
+@Test func systemAndHomebrewNodeModulesAreNotHits() async throws {
+    let rules = LensRules.bundled
+    for path in ["opt/homebrew/Caskroom/x/node_modules", "usr/local/lib/node_modules", "usr/local/share/t/node_modules",
+                 "Library/Application Support/t/node_modules", "Applications/Tool/node_modules", "System/Library/x/node_modules",
+                 "private/var/x/node_modules", "Volumes/Other/proj/node_modules", "Users/Shared/Library/t/node_modules",
+                 "usr/local/Caskroom/x/1.0/node_modules", "Users/a/stuff/Caskroom/x/node_modules"] {
+        #expect(rules.rule(covering: path) == nil, "\(path)")
+    }
+    #expect(rules.rule(covering: "Users/a/proj/node_modules")?.id == "node-modules")
+    #expect(rules.rule(covering: "proj/node_modules")?.id == "node-modules")
+    let idx = try await Fixtures.index([
+        "opt/homebrew/Caskroom/x/node_modules/a.bin": 2_000_000,
+        "usr/local/lib/node_modules/b.bin": 2_000_000,
+        "Library/Application Support/t/node_modules/c.bin": 2_000_000,
+        "Users/a/proj/node_modules/d.bin": 2_000_000,
+    ])
+    #expect(LensMatcher.report(index: idx, rules: rules).hits.map(\.path) == ["Users/a/proj/node_modules"])
+}
+
