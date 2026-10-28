@@ -39,7 +39,7 @@ public final class DriveController: ObservableObject {
     private(set) var holds = 0
     /// Counts the open index's updates into `generation`; lives from open to close.
     private var watching: Task<Void, Never>?
-    private var cachedBaseline: (period: Int, day: Day, snapshot: SizeSnapshot?)?
+    private(set) var cachedBaseline: (period: Int, day: Day, snapshot: SizeSnapshot?)?
 
     public var hasJournal: Bool { EventWatcher.journalUUID(device: volume.device) != nil }
 
@@ -208,7 +208,9 @@ extension DriveController: MapSource {
     private func baseline(days: Int, from index: LiveIndex) async -> SizeSnapshot? {
         let today = Day(.now, calendar: .current)
         if let cached = cachedBaseline, cached.period == days, cached.day == today { return cached.snapshot }
-        guard let snapshot = try? await index.baseline(days: days) else { return nil }
+        // No history that far back is an answer too (nil), and cached; a failed read is not.
+        let snapshot: SizeSnapshot?
+        do { snapshot = try await index.baseline(days: days) } catch { return nil }
         if self.index === index { cachedBaseline = (days, today, snapshot) }
         return snapshot
     }

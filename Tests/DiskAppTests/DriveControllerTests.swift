@@ -186,3 +186,14 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
     #expect(c.generation > before)
     c.release(); await c.cool()
 }
+
+// A drive with no history has no baseline; that answer is cached too.
+@MainActor @Test func nilBaselineIsCached() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.hold()
+    _ = await c.buildMap(MapRequest(path: "", size: CGSize(width: 400, height: 300), period: 7))
+    let cached = try #require(c.cachedBaseline)
+    #expect(cached.period == 7 && cached.snapshot == nil)
+    c.release(); await c.cool()
+}
