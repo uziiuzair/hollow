@@ -27,17 +27,18 @@ import Testing
     let store = try Fixtures.tempDir()
     let live = LiveIndex(volumeRoot: root, store: store)
     _ = try await live.open()
-    let before = await live.withIndex { $0.lastEventID }
+    // The live watcher applies real events meanwhile; use IDs far above them.
+    let failedID = await live.withIndex { $0.lastEventID } + 1_000_000_000
     try Fixtures.write(root.appending(path: "a/g.bin"), bytes: 1_500_000)
     await live.injectFault { throw DiskEngineError.posix("injected", ENOSPC) }
-    let change = FSChange(path: Fixtures.realPath(root) + "/a", id: before + 10, rescanSubtree: false, historyLost: false)
+    let change = FSChange(path: Fixtures.realPath(root) + "/a", id: failedID, rescanSubtree: false, historyLost: false)
     await #expect(throws: (any Error).self) { try await live.apply([change]) }
-    #expect(await live.withIndex { $0.lastEventID } == before)
+    #expect(await live.withIndex { $0.lastEventID } < failedID)
     #expect(!FileManager.default.fileExists(atPath: store.appending(path: "index.snapshot").path))
     await live.injectFault(nil)
-    try await live.apply([FSChange(path: Fixtures.realPath(root), id: before + 11, rescanSubtree: false, historyLost: false)])
+    try await live.apply([FSChange(path: Fixtures.realPath(root), id: failedID + 1, rescanSubtree: false, historyLost: false)])
     #expect(await live.withIndex { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root))
-    #expect(await live.withIndex { $0.lastEventID } == before + 11)
+    #expect(await live.withIndex { $0.lastEventID } == failedID + 1)
     try await live.close()
 }
 
