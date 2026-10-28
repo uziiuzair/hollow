@@ -24,10 +24,11 @@ struct DropdownHost: View {
     let openMap: (String?) -> Void
     /// "Review N GB to clear": opens the map with the review sheet, pre-filled with what regenerates.
     let reviewClearable: () -> Void
+    let openSettings: () -> Void
 
     var body: some View {
         DropdownView(model: state.model, period: state.period, select: select, setPeriod: setPeriod, eject: eject, openMap: openMap,
-                     reviewClearable: reviewClearable)
+                     reviewClearable: reviewClearable, openSettings: openSettings)
     }
 }
 
@@ -57,6 +58,7 @@ struct DropdownView: View {
     let eject: () -> Void
     let openMap: (String?) -> Void
     let reviewClearable: () -> Void
+    let openSettings: () -> Void
 
     private var isOffline: Bool { model.tabs.first(where: \.isSelected)?.isOffline ?? false }
 
@@ -315,7 +317,7 @@ struct DropdownView: View {
             Text(model.footerLeft)
             Spacer()
             switch model.footerRight {
-            case .settings: Text("Settings \u{2318},")
+            case .settings: Button("Settings \u{2318},", action: openSettings).buttonStyle(.plain)
             case .eject: Button("Eject", action: eject).buttonStyle(.plain)
             case .none: EmptyView()
             }

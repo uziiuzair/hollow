@@ -61,7 +61,7 @@ public struct DropdownModel: Equatable, Sendable {
                             now: Date, clearable: UInt64? = nil) -> DropdownModel {
         let tabs = tabList(drives, selected: selected, connected: connected)
         let drive = drives.first { $0.uuid == selected }
-        let isInternal = drive?.tintIndex == 0
+        let isInternal = drive?.isInternal == true
         let isOnline = connected.contains(selected)
 
         let (title, detail) = freeText(drive: drive, space: space, isOnline: isOnline)
@@ -111,8 +111,8 @@ public struct DropdownModel: Equatable, Sendable {
     }
 
     private static func tabList(_ drives: [KnownDrive], selected: String, connected: Set<String>) -> [Tab] {
-        let internalDrives = drives.filter { $0.tintIndex == 0 }
-        let others = drives.filter { $0.tintIndex != 0 }.sorted { $0.lastSeen > $1.lastSeen }
+        let internalDrives = drives.filter(\.isInternal)
+        let others = drives.filter { !$0.isInternal }.sorted { $0.lastSeen > $1.lastSeen }
         return (internalDrives + others).map {
             Tab(uuid: $0.uuid, name: $0.name, tintIndex: $0.tintIndex, isSelected: $0.uuid == selected,
                 isOffline: !connected.contains($0.uuid))

@@ -46,3 +46,22 @@ import Foundation
     #expect(reg.needsWrite(for: VolumeInfo(url: v.url, uuid: "T7", name: "Renamed", isInternalData: false, device: 3)))
     #expect(reg.needsWrite(for: VolumeInfo(url: v.url, uuid: "New", name: "New", isInternalData: false, device: 4)))
 }
+
+@Test func tintChoiceSticksAndNewDrivesAvoidIt() throws {
+    let file = try Fixtures.tempDir().appending(path: "drives.json"); let reg = DriveRegistry(file: file)
+    _ = try reg.upsert(.init(url: URL(filePath: "/"), uuid: "I", name: "Macintosh HD", isInternalData: true, device: 1), space: nil, now: .now)
+    _ = try reg.upsert(.init(url: URL(filePath: "/Volumes/A"), uuid: "A", name: "A", isInternalData: false, device: 2), space: nil, now: .now)
+    try reg.setTint(uuid: "A", index: 5); try reg.setTint(uuid: "I", index: 1)
+    let b = try reg.upsert(.init(url: URL(filePath: "/Volumes/B"), uuid: "B", name: "B", isInternalData: false, device: 3), space: nil, now: .now)
+    #expect(b.tintIndex == 2)
+    let reloaded = DriveRegistry(file: file).all()
+    #expect(reloaded.map(\.tintIndex) == [1, 5, 2] && reloaded.map(\.isInternal) == [true, false, false])
+    #expect(throws: RegistryError.tintOutOfRange) { try reg.setTint(uuid: "A", index: 8) }
+    #expect(throws: RegistryError.unknownDrive) { try reg.setTint(uuid: "nope", index: 2) }
+}
+
+@Test func oldRegistryFilesKeepTheirInternalDrive() throws {
+    let file = try Fixtures.tempDir().appending(path: "drives.json")
+    try Data(#"[{"uuid":"I","name":"Macintosh HD","tintIndex":0,"lastSeen":"2026-10-01T00:00:00Z"},{"uuid":"T7","name":"T7","tintIndex":1,"lastSeen":"2026-10-01T00:00:00Z"}]"#.utf8).write(to: file)
+    #expect(DriveRegistry(file: file).all().map(\.isInternal) == [true, false])
+}

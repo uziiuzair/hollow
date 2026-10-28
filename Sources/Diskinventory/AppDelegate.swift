@@ -40,6 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastDismiss = Date.distantPast
     private var clickMonitor: Any?
     private var mapWindow: MapWindowController?
+    private let settingsStore = SettingsStore()
+    private let settingsDrives = SettingsDrives()
+    private var settingsWindow: SettingsWindowController?
+    private var settingsSubscription: AnyCancellable?
+    private var appliedSettings: AppSettings?
     /// One basket per mounted drive, by volume UUID; dropped when the drive is really gone (C20).
     private let baskets = BasketStore()
     /// Last saved summaries of drives that are not connected, read once per uuid and period.
@@ -71,6 +76,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             NSLog("Diskinventory: cannot open store: \(error)")
         }
+        // Emits the current value first (a no-op after the controllers were created with it), then every change.
+        settingsSubscription = settingsStore.$settings.map { $0.normalized() }.removeDuplicates()
+            .sink { [weak self] new in
+                Task { @MainActor in self?.settingsChanged(new) }
+            }
 
         labelTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
@@ -114,6 +124,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--show-panel") {
             DispatchQueue.main.async { [weak self] in self?.showPanel(keepOpen: true) }
         }
+        // --show-settings [--settings-snapshot <png>]: opens Settings, and renders it to a PNG for a locked screen.
+        if CommandLine.arguments.contains("--show-settings") {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.openSettings(nil)
+                if let i = CommandLine.arguments.firstIndex(of: "--settings-snapshot"), i + 1 < CommandLine.arguments.count {
+                    let out = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                        self?.debugCapture(self?.settingsWindow?.window, to: out)
+                    }
+                }
+            }
+        }
         if CommandLine.arguments.contains("--show-map"), let id = internalUUID {
             startHeartbeat()
             DispatchQueue.main.async { [weak self] in self?.openMap(uuid: id, focus: nil) }
@@ -139,7 +162,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             let read = await Task.detached(priority: .utility) { try? VolumeSpace.read(volume) }.value
             guard let self, let space = read, let button = self.statusItem.button else { return }
-            let label = MenuBarLabel.make(space: space, showNumber: true)
+            let settings = self.settingsStore.settings
+            let label = MenuBarLabel.make(space: space, showNumber: settings.menuBarStyle == .ringAndNumber,
+                                          lowFraction: Double(settings.lowPercent) / 100,
+                                          criticalFraction: Double(settings.criticalPercent) / 100)
             button.image = StatusIcon.image(fill: label.fillFraction, level: label.level)
             button.title = label.text.isEmpty ? "" : " " + label.text
         }
@@ -189,7 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for v in volumes {
             var connected = false
             if controllers[v.uuid] == nil, let store = try? LiveIndex.storeDirectory(base: storeBase, volume: v.url) {
-                controllers[v.uuid] = DriveController(volume: v, store: store)
+                controllers[v.uuid] = DriveController(volume: v, store: store, exclusions: exclusions(for: v))
                 connectedSince[v.uuid] = now
                 connected = true
             }
@@ -214,6 +240,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             observeSelected()
         }
         rebuild()
+    }
+
+    /// The skipped folders as paths relative to this volume's root.
+    private func exclusions(for volume: VolumeInfo) -> Set<String> {
+        settingsStore.settings.exclusions(under: volume.url.resolvingSymlinksInPath().path)
+    }
+
+    private func settingsChanged(_ new: AppSettings) {
+        let old = appliedSettings
+        appliedSettings = new
+        if old?.menuBarStyle != new.menuBarStyle || old?.lowPercent != new.lowPercent || old?.criticalPercent != new.criticalPercent {
+            refresh()
+        }
+        if old?.excludedFolders != new.excludedFolders {
+            for c in controllers.values {
+                let paths = new.exclusions(under: c.volume.url.resolvingSymlinksInPath().path)
+                Task { await c.setExclusions(paths) }
+            }
+        }
     }
 
     private func controller(for url: URL?) -> DriveController? {
@@ -315,6 +360,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let c, c.space == nil { Task { await c.refreshSpace() } }
         let period = c?.period ?? offlinePeriod
         let summary = c?.summary ?? (connected.contains(selected) ? nil : cachedSummary(selected, period: period))
+        settingsDrives.drives = registry.all()
         let model = DropdownModel.make(
             drives: registry.all(), selected: selected, connected: connected, summary: summary,
             space: c?.space, activity: c?.activity ?? .offline, period: period,
@@ -386,8 +432,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             reviewClearable: { [weak self] in
                 guard let self else { return }
                 self.reviewClearable(uuid: self.selected)
-            })
+            },
+            openSettings: { [weak self] in self?.openSettings(nil) })
         let p = DropdownPanel(rootView: host)
+        p.onOpenSettings = { [weak self] in self?.openSettings(nil) }
         p.onDismiss = { [weak self] in self?.panelDismissed() }
         return p
     }
@@ -603,6 +651,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = bar
     }
 
+    // MARK: Settings window
+
+    @objc func openSettings(_ sender: Any?) {
+        panel?.dismiss()
+        if settingsWindow == nil {
+            let window = SettingsWindowController(store: settingsStore, drives: settingsDrives,
+                                                  setTint: { [weak self] uuid, index in self?.setTint(uuid: uuid, index: index) })
+            window.onClose = { [weak self] in
+                // The window object stays; the Dock icon goes unless the map window is open.
+                self?.settingsOpen = false
+                self?.updateActivationPolicy()
+            }
+            settingsWindow = window
+        }
+        settingsOpen = true
+        updateActivationPolicy()
+        NSApp.activate()
+        settingsWindow?.showWindow(nil)
+        settingsWindow?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private var settingsOpen = false
+
+    /// Regular (Dock icon, menu bar) while the map or Settings window is open, else accessory.
+    private func updateActivationPolicy() {
+        NSApp.setActivationPolicy(mapWindow != nil || settingsOpen ? .regular : .accessory)
+    }
+
+    private func setTint(uuid: String, index: Int) {
+        guard registry != nil, (try? registry.setTint(uuid: uuid, index: index)) != nil else { return }
+        rebuild()
+        if let window = mapWindow, window.uuid == uuid { window.setTint(index: index) }
+    }
+
     // MARK: Map window
 
     /// Opens the map for drive `uuid`: at the root when `focus` is nil or empty, else at
@@ -639,8 +721,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.onClose = { [weak self, weak window] in
                 guard let self, self.mapWindow === window else { return }
                 self.mapWindow = nil
-                // The Dock icon shows only while the window is open (spec 5).
-                NSApp.setActivationPolicy(.accessory)
+                // The Dock icon shows only while a window is open (spec 5).
+                self.updateActivationPolicy()
             }
             window.onFirstFrame = { [weak self] in
                 let ms = (clock.now - started) / .milliseconds(1)
@@ -653,7 +735,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             mapWindow = window
         }
-        NSApp.setActivationPolicy(.regular)
+        updateActivationPolicy()
         NSApp.activate()
         mapWindow?.showWindow(nil)
         mapWindow?.window?.makeKeyAndOrderFront(nil)

@@ -511,6 +511,11 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: Close
 
+    /// The drive chip and selection colour follow a tint chosen in Settings.
+    func setTint(index: Int) {
+        ui?.tint = Palette.tints[index % Palette.tints.count]
+    }
+
     func windowWillClose(_ notification: Notification) {
         if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.isVisible,
            panel.dataSource === self {

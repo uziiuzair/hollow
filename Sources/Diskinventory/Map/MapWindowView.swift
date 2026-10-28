@@ -22,7 +22,7 @@ final class MapWindowState: ObservableObject {
     @Published var reviewPhase = ReviewPhase.review
 
     let driveName: String
-    let tint: Color
+    @Published var tint: Color
     let isInternal: Bool
     /// This drive's basket, shared with the dropdown's "Review N GB to clear".
     let basket: Basket

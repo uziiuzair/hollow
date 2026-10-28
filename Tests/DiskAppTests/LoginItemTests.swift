@@ -22,3 +22,11 @@ final class MemoryFlags: FlagStore {
     #expect(LoginItem.shouldRegister(bundlePath: "\(home)/Applications/Diskinventory.app", home: home))
     #expect(!LoginItem.shouldRegister(bundlePath: "/Users/someone/proj/.build/Diskinventory.app", home: home))
 }
+
+@Test func loginToggleFollowsServiceStatus() {
+    #expect(LoginItem.toggle(status: .enabled, installed: true) == LoginToggle(isOn: true, isEnabled: true, note: nil))
+    #expect(LoginItem.toggle(status: .enabled, installed: false)
+        == LoginToggle(isOn: true, isEnabled: false, note: "Move Diskinventory to Applications to launch it at login."))
+    #expect(LoginItem.toggle(status: .requiresApproval, installed: true)
+        == LoginToggle(isOn: false, isEnabled: true, note: "Allow Diskinventory in System Settings \u{203A} General \u{203A} Login Items."))
+}
