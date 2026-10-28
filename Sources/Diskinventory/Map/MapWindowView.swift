@@ -3,6 +3,11 @@ import DiskApp
 import DiskEngine
 import SwiftUI
 
+/// Where the review sheet is: checking the list, moving, or showing what happened.
+enum ReviewPhase: Equatable {
+    case review, moving, done(TrashOutcome)
+}
+
 /// The window's own UI state: the search field and command list, and the drive chip.
 @MainActor
 final class MapWindowState: ObservableObject {
@@ -14,6 +19,7 @@ final class MapWindowState: ObservableObject {
     @Published var commandIndex = 0
     @Published var free: String?
     @Published var reviewShown = false
+    @Published var reviewPhase = ReviewPhase.review
 
     let driveName: String
     let tint: Color
@@ -42,8 +48,7 @@ final class MapWindowState: ObservableObject {
 
     /// What map rect `rect` would put in the basket, or nil for a bucket or the root.
     func basketItem(_ model: MapModel, rect: Int) -> BasketItem? {
-        guard let snapshot = model.snapshot, snapshot.nodes.indices.contains(rect) else { return nil }
-        return BasketItem.from(node: snapshot.nodes[rect], size: snapshot.layout.rects[rect].size)
+        model.snapshot?.basketItem(at: rect)
     }
 
     /// The selection is a real item that is not already in the basket (itself or inside a folder there).
@@ -145,7 +150,7 @@ struct MapWindowView: View {
         .coordinateSpace(name: Self.space)
         .ignoresSafeArea()
         .sheet(isPresented: $ui.reviewShown) {
-            ReviewSheetView(basket: basket, protected: actions.protected, driveName: ui.driveName,
+            ReviewSheetView(basket: basket, phase: $ui.reviewPhase, protected: actions.protected, driveName: ui.driveName,
                             driveConnected: model.status != .offline, move: actions.trash,
                             close: { ui.reviewShown = false })
         }
@@ -346,17 +351,23 @@ private struct SideList: View {
         .padding(.vertical, 10).padding(.horizontal, 8)
     }
 
+    /// A press on row `node`, keyed by the node it shows now.
+    private func press(at point: CGPoint, node: Int) -> BasketDrag {
+        let key = model.snapshot.flatMap { $0.nodes.indices.contains(node) ? $0.nodes[node].key : nil }
+        return BasketDrag(at: point, item: node, key: key)
+    }
+
     /// Feeds the same drag the map's blocks do, in the window's coordinate space.
     private func rowDragGesture(_ node: Int) -> some Gesture {
         DragGesture(minimumDistance: BasketDrag.threshold, coordinateSpace: .named(MapWindowView.space))
             .onChanged { value in
-                var d = rowDrag.flatMap { $0.item == node ? $0 : nil } ?? BasketDrag(at: value.startLocation, item: node)
+                var d = rowDrag.flatMap { $0.item == node ? $0 : nil } ?? press(at: value.startLocation, node: node)
                 d.move(to: value.location)
                 rowDrag = d
                 drag(d)
             }
             .onEnded { value in
-                var d = rowDrag.flatMap { $0.item == node ? $0 : nil } ?? BasketDrag(at: value.startLocation, item: node)
+                var d = rowDrag.flatMap { $0.item == node ? $0 : nil } ?? press(at: value.startLocation, node: node)
                 d.move(to: value.location)
                 rowDrag = nil
                 drop(d)

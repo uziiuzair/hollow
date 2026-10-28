@@ -147,3 +147,26 @@ let dockerHit = LensHit(ruleID: "docker", path: "Users/u/Library/Containers/com.
     #expect(!b.accepts(item("a", 1)) && !b.accepts(item("a/b", 1)) && !b.accepts(item("", 1)) && !b.accepts(item("x#small", 1)))
     #expect(b.accepts(item("c", 1)) && b.accepts(item("ab", 1)))
 }
+
+private func level(_ nodes: [MapNode], sizes: [UInt64]) -> MapSnapshot {
+    let rects = sizes.map { TreemapRect(ref: .folder(1), size: $0, frame: .zero, depth: 1, parent: -1) }
+    return MapSnapshot(path: "", rootPath: "/", crumbs: [], total: 0, period: 7,
+                       layout: TreemapLayout(rects: rects, bounds: .zero, topLevelCount: rects.count), nodes: nodes, list: [])
+}
+
+@Test func dropAfterARebuildAddsThePressedItemOrNothing() {
+    let a = MapNode(key: "Users/u/a", name: "a", kind: .other, growth: 0, isFolder: true)
+    let b = MapNode(key: "Users/u/b", name: "b", kind: .media, growth: 0, isFolder: false)
+    let small = MapNode(key: "Users/u#small", name: "Small files", kind: nil, growth: 0, isFolder: false)
+    let before = level([a, b], sizes: [9, 5])
+    var d = BasketDrag(at: .zero, item: 0, key: before.nodes[0].key)
+    d.move(to: CGPoint(x: 10, y: 0))
+    // Rebuilt during the drag: rect 0 is now b, and a moved to rect 1 with a new size.
+    let reordered = level([b, a], sizes: [12, 9])
+    #expect(reordered.basketItem(droppedKey: d.key!)?.path == "Users/u/a")
+    #expect(reordered.basketItem(droppedKey: d.key!)?.size == 9)
+    // Gone from this level (folded into the small-files bucket): nothing is added.
+    #expect(level([b, small], sizes: [12, 1]).basketItem(droppedKey: d.key!) == nil)
+    #expect(level([b, small], sizes: [12, 1]).basketItem(droppedKey: "Users/u#small") == nil)
+    #expect(level([b, small], sizes: [12, 1]).basketItem(at: 1) == nil)
+}

@@ -6,15 +6,19 @@ import CoreGraphics
 public struct BasketDrag: Equatable, Sendable {
     public static let threshold: CGFloat = 4
 
-    /// The dragged map rect.
+    /// The dragged map rect, in the snapshot shown when the press began.
     public var item: Int
+    /// The pressed node's key. A drop resolves the item by this key in the snapshot shown then, so a rebuild during the
+    /// drag can never put a different node in the basket.
+    public var key: String?
     /// Where the pointer is now, in the window's coordinate space.
     public var location: CGPoint
     public private(set) var isActive = false
     private let origin: CGPoint
 
-    public init(at origin: CGPoint, item: Int) {
+    public init(at origin: CGPoint, item: Int, key: String? = nil) {
         self.item = item
+        self.key = key
         self.origin = origin
         self.location = origin
     }

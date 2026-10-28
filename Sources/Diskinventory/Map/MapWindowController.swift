@@ -176,9 +176,23 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: Basket
 
-    /// Opens the review sheet over the map.
+    /// True while the review sheet is moving items to the Trash; the window must not be replaced or closed then.
+    var isMovingToTrash: Bool { ui?.reviewPhase == .moving }
+
+    /// Opens the review sheet over the map, back at its list when it was showing a finished move.
+    /// Does nothing to a sheet that is moving.
     func presentReview() {
-        ui?.reviewShown = true
+        guard let ui, ui.reviewPhase != .moving else { return }
+        ui.reviewPhase = .review
+        ui.reviewShown = true
+    }
+
+    /// Takes the review sheet down at once (before the window closes). Not while it is moving.
+    func endReview() {
+        guard let ui, ui.reviewPhase != .moving else { return }
+        ui.reviewShown = false
+        ui.reviewPhase = .review
+        if let window, let sheet = window.attachedSheet { window.endSheet(sheet) }
     }
 
     /// ⌫ and "Add to Basket": the selected block, unless it is a bucket, the root or already in the basket.
@@ -200,7 +214,11 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
 
     private func dropped(_ drag: BasketDrag) {
         guard let dragState else { return }
-        if drag.dropsOnBasket(dragState.barFrame) { addToBasket(rect: drag.item) }
+        // By the pressed node's key in the map shown now: a rebuild during the drag adds the pressed item or nothing.
+        if drag.dropsOnBasket(dragState.barFrame), let key = drag.key,
+           let item = model?.snapshot?.basketItem(droppedKey: key) {
+            basket.add(item)
+        }
         dragState.drag = nil
     }
 
@@ -358,7 +376,7 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     func debugSheetSnapshot(to url: URL) {
         debugLog.info("debug-basket: sheet presented \(self.window?.attachedSheet != nil), frame \(String(describing: self.window?.attachedSheet?.frame), privacy: .public)")
         guard let ui else { return }
-        let view = ReviewSheetView(basket: basket, protected: { [weak self] in self?.driveController?.protectedHits ?? [] },
+        let view = ReviewSheetView(basket: basket, phase: .constant(.review), protected: { [weak self] in self?.driveController?.protectedHits ?? [] },
                                    driveName: ui.driveName, driveConnected: model?.status != .offline,
                                    move: { .driveGone($0, protected: []) }, close: {})
         let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
@@ -377,12 +395,18 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         let protected = driveController?.protectedHits ?? []
         let items = ReviewSheet.trashable(basket.items, unchecked: [], protected: protected)
         debugLog.info("debug-basket: moving \(items.map(\.path), privacy: .public)")
+        ui?.reviewPhase = .moving
         let outcome = await moveToTrash(items)
         basket.remove(paths: outcome.cleared)
+        ui?.reviewPhase = .done(outcome)
         return outcome
     }
 
     func debugCloseReview() { ui?.reviewShown = false }
+
+    var debugReview: (shown: Bool, phase: ReviewPhase)? { ui.map { ($0.reviewShown, $0.reviewPhase) } }
+
+    func debugSetPhase(_ phase: ReviewPhase) { ui?.reviewPhase = phase }
 
     private func debugBasketLine(_ step: String) {
         let items = basket.items.map(\.path)

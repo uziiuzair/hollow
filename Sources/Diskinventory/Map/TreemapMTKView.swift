@@ -43,8 +43,9 @@ final class TreemapMTKView: MTKView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         drag = nil
-        guard let layout = snapshot?.layout, let hit = layout.hitTest(point(event)), let content = contentPoint(event) else { return }
-        drag = BasketDrag(at: content, item: layout.topLevel(of: hit))
+        guard let snapshot, let hit = snapshot.layout.hitTest(point(event)), let content = contentPoint(event) else { return }
+        let top = snapshot.layout.topLevel(of: hit)
+        drag = BasketDrag(at: content, item: top, key: snapshot.nodes.indices.contains(top) ? snapshot.nodes[top].key : nil)
     }
 
     override func mouseDragged(with event: NSEvent) {

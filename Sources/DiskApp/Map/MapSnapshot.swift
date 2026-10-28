@@ -91,3 +91,19 @@ public struct MapSnapshot: Equatable, Sendable {
         return URL(fileURLWithPath: rootPath + "/" + nodes[node].key)
     }
 }
+
+extension MapSnapshot {
+    /// What rect `rect` would put in the basket: nil for a bucket, the root or a rect this snapshot does not have.
+    public func basketItem(at rect: Int) -> BasketItem? {
+        guard nodes.indices.contains(rect), layout.rects.indices.contains(rect) else { return nil }
+        return BasketItem.from(node: nodes[rect], size: layout.rects[rect].size)
+    }
+
+    /// What a drop of a press on `key` adds: that item as this level shows it now, or nil when it is no longer a
+    /// top-level block here (the map was rebuilt, zoomed or the item went away during the drag).
+    public func basketItem(droppedKey key: String) -> BasketItem? {
+        guard let rect = (0..<layout.topLevelCount).first(where: { nodes.indices.contains($0) && nodes[$0].key == key })
+        else { return nil }
+        return basketItem(at: rect)
+    }
+}

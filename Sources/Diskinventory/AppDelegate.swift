@@ -483,13 +483,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The only volume the basket driver will touch: a disk image mounted at exactly this path, never the internal disk (C9).
     private static let debugBasketVolume = "/Volumes/DITrash"
 
+    /// A plain file only the check script creates at the image's root.
+    private static let debugBasketMarker = ".diskinventory-test-volume"
+
+    /// True when `hdiutil info` lists a disk image mounted at exactly `mountPoint`.
+    nonisolated private static func isMountedDiskImage(at mountPoint: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        process.arguments = ["info", "-plist"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        guard (try? process.run()) != nil else { return false }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let images = info["images"] as? [[String: Any]] else { return false }
+        return images.contains { image in
+            (image["system-entities"] as? [[String: Any]] ?? []).contains { ($0["mount-point"] as? String) == mountPoint }
+        }
+    }
+
     private func debugBasket(to dir: URL, move: Bool) async {
         let url = URL(fileURLWithPath: Self.debugBasketVolume)
         let values = try? url.resourceValues(forKeys: [.volumeIsInternalKey, .volumeIsEjectableKey, .volumeURLKey])
+        let volume = Self.debugBasketVolume
+        let isImage = await Task.detached { Self.isMountedDiskImage(at: volume) }.value
+        var marker = stat()
+        let hasMarker = lstat(volume + "/" + Self.debugBasketMarker, &marker) == 0 && (marker.st_mode & S_IFMT) == S_IFREG
         guard let c = controller(for: url), !c.volume.isInternalData, c.volume.url.path == Self.debugBasketVolume,
-              values?.volume?.path == Self.debugBasketVolume, values?.volumeIsInternal != true, values?.volumeIsEjectable == true
+              values?.volume?.path == Self.debugBasketVolume, values?.volumeIsInternal != true, values?.volumeIsEjectable == true,
+              isImage, hasMarker
         else {
-            mapLog.error("debug-basket: refused, \(Self.debugBasketVolume, privacy: .public) is not a mounted external image")
+            mapLog.error("debug-basket: refused, \(Self.debugBasketVolume, privacy: .public) is not a marked, mounted disk image")
             return
         }
         let uuid = c.volume.uuid
@@ -522,6 +548,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                   ruleID: nil, safety: nil)
             let linkOutcome = await c.trash([link], backend: SystemTrash())
             mapLog.info("debug-basket: symlink moved \(linkOutcome.moved, privacy: .public) failures \(linkOutcome.failureLines, privacy: .public)")
+
+            // While a sheet is moving, its window is neither replaced nor reset.
+            window.debugSetPhase(.moving)
+            let opened = openMap(uuid: internalUUID ?? "", focus: nil)
+            reviewClearable(uuid: uuid)
+            mapLog.info("debug-basket: while moving: other drive's map opened \(opened), window kept \(self.mapWindow === window), sheet \(String(describing: window.debugReview), privacy: .public)")
+            // A finished sheet goes back to its list on the next review.
+            window.debugSetPhase(.done(outcome))
+            reviewClearable(uuid: uuid)
+            mapLog.info("debug-basket: review after done: sheet \(String(describing: window.debugReview), privacy: .public)")
         }
         window.debugCloseReview()
         await settle()
@@ -571,11 +607,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Opens the map for drive `uuid`: at the root when `focus` is nil or empty, else at
     /// `focus`'s parent with `focus` selected. One map window at a time.
-    func openMap(uuid: String, focus: String?) {
+    /// False when nothing opened: the drive is gone, or another drive's window is moving items to the Trash.
+    @discardableResult
+    func openMap(uuid: String, focus: String?) -> Bool {
         let clock = ContinuousClock()
         let started = clock.now
         guard let controller = controllers[uuid], unmounts[uuid] == nil,
-              let drive = registry?.all().first(where: { $0.uuid == uuid }) else { return }
+              let drive = registry?.all().first(where: { $0.uuid == uuid }) else { return false }
         var path = "", select: String?
         if let focus, !focus.isEmpty {
             path = focus.lastIndex(of: "/").map { String(focus[..<$0]) } ?? ""
@@ -585,6 +623,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.show(path: path, select: select)
         } else {
             if let old = mapWindow {
+                // A move to the Trash in progress keeps its window and sheet: refuse, and show it.
+                guard !old.isMovingToTrash else {
+                    NSSound.beep()
+                    NSApp.activate()
+                    old.window?.makeKeyAndOrderFront(nil)
+                    return false
+                }
+                old.endReview()
                 mapWindow = nil
                 old.close()
             }
@@ -616,17 +662,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         if let w = mapWindow?.window { NSLog("Diskinventory map window \(w.windowNumber) frame \(w.frame)") }
         #endif
+        return true
     }
 
     /// "Review N GB to clear": puts the drive's regenerating hits in its basket, opens the map at the root and shows
     /// the review sheet. Nothing moves until the user presses "Move N items to Trash" there.
     func reviewClearable(uuid: String) {
         panel?.dismiss()
-        guard let c = controllers[uuid], unmounts[uuid] == nil else { return }
+        guard let c = controllers[uuid], unmounts[uuid] == nil, openMap(uuid: uuid, focus: nil),
+              let window = mapWindow, window.uuid == uuid, window.driveController === c else { return }
+        // A sheet that is moving keeps its list; the hits wait for the next review.
+        guard !window.isMovingToTrash else { NSSound.beep(); return }
         let hits = c.lens?.hits.filter { $0.safety == .regenerates } ?? []
         baskets.basket(for: uuid).add(contentsOf: hits.map(BasketItem.from(hit:)))
-        openMap(uuid: uuid, focus: nil)
-        guard let window = mapWindow, window.uuid == uuid, window.driveController === c else { return }
         window.presentReview()
     }
 

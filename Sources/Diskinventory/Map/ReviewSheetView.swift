@@ -5,6 +5,8 @@ import SwiftUI
 /// The list the user checks before anything moves to the Trash. Nothing moves until "Move N items to Trash".
 struct ReviewSheetView: View {
     @ObservedObject var basket: Basket
+    /// Kept by the window, so it can tell a move is under way and reset a finished sheet.
+    @Binding var phase: ReviewPhase
     /// The drive's app-managed hits, read each time the sheet draws.
     let protected: () -> [LensHit]
     let driveName: String
@@ -13,10 +15,8 @@ struct ReviewSheetView: View {
     let move: ([BasketItem]) async -> TrashOutcome
     let close: () -> Void
 
-    private enum Phase { case review, moving, done(TrashOutcome) }
 
     @State private var unchecked: Set<String> = []
-    @State private var phase = Phase.review
 
     static let width: CGFloat = 560
     static let maxRowsHeight: CGFloat = 420
@@ -33,10 +33,7 @@ struct ReviewSheetView: View {
         .interactiveDismissDisabled(isMoving)
     }
 
-    private var isMoving: Bool {
-        if case .moving = phase { return true }
-        return false
-    }
+    private var isMoving: Bool { phase == .moving }
 
     // MARK: Review
 
