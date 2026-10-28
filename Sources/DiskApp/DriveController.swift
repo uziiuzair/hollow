@@ -17,7 +17,7 @@ public final class DriveController: ObservableObject {
         didSet {
             guard period != oldValue else { return }
             summary = DriveSummary.load(from: store, period: period)
-            if index != nil { Task { await refresh() } }
+            Task { await self.run { if self.index != nil { await self.refresh() } } }
         }
     }
 
@@ -25,10 +25,11 @@ public final class DriveController: ObservableObject {
     private let store: URL
     private let coolDown: Duration
     private var index: LiveIndex?
-    private var opening: Task<LiveIndex?, Never>?
     private var timer: Task<Void, Never>?
-    /// Bumped by every close so an in-flight `warm()` knows it was superseded.
-    private var epoch = 0
+    private var timerID = 0
+    private var unmounting = false
+    /// Every warm/cool/unmount body runs through this chain, strictly one at a time.
+    private var lifecycle: Task<Void, Never>?
 
     public var hasJournal: Bool { EventWatcher.journalUUID(device: volume.device) != nil }
 
@@ -43,43 +44,76 @@ public final class DriveController: ObservableObject {
         FileManager.default.fileExists(atPath: store.appending(path: "index.snapshot").path)
     }
 
+    private func run(_ body: @escaping @MainActor () async -> Void) async {
+        let previous = lifecycle
+        let task = Task { @MainActor in
+            await previous?.value
+            await body()
+        }
+        lifecycle = task
+        await task.value
+    }
+
     public func warm() async {
-        guard activity != .offline else { return }
-        let start = epoch
+        await run { await self.warmBody() }
+    }
+
+    public func cool() async {
+        await run { await self.coolBody() }
+    }
+
+    public func recordDailyHistoryIfNeeded() async {
+        await run {
+            guard self.volume.isInternalData, self.index == nil, !self.unmounting else { return }
+            let today = Day(.now, calendar: .current)
+            if let days = try? HistoryStore(directory: self.store.appending(path: "history")).days(),
+               days.contains(today) { return }
+            await self.warmBody()
+            await self.coolBody()
+        }
+    }
+
+    /// Marks the drive offline at once, then waits for everything queued before it and
+    /// its own close. Later warm() calls do nothing.
+    public func willUnmount() async {
+        unmounting = true
+        activity = .offline
+        await run { await self.coolBody() }
+    }
+
+    public func refreshSpace() {
+        if let s = try? VolumeSpace.read(volume.url) { space = s }
+    }
+
+    private func warmBody() async {
+        guard !unmounting else { return }
         if index == nil {
-            if let opening {
-                _ = await opening.value
-            } else {
-                await open()
+            let live = LiveIndex(volumeRoot: volume.url, store: store)
+            // Without a snapshot or a journal, open() will do a full scan.
+            activity = (snapshotExists && hasJournal) ? .opening : .scanning
+            do {
+                _ = try await live.open()
+                index = live
+            } catch {
+                try? await live.close()
+                activity = .idle
+                return
             }
         }
-        guard epoch == start, index != nil else { return }
         await refresh()
-        guard epoch == start, index != nil else { return }
+        guard !unmounting else { return }
         activity = .ready
         restartTimer()
     }
 
-    /// The open task owns the instance. If `cool()`/`willUnmount()` ran meanwhile
-    /// (epoch changed), they take the instance from the task and close it; this
-    /// method then leaves everything alone.
-    private func open() async {
-        let live = LiveIndex(volumeRoot: volume.url, store: store)
-        let start = epoch
-        // Without a snapshot or a journal, open() will do a full scan.
-        activity = (snapshotExists && hasJournal) ? .opening : .scanning
-        let task = Task { () -> LiveIndex? in
-            do { _ = try await live.open(); return live } catch { try? await live.close(); return nil }
+    private func coolBody() async {
+        timer?.cancel(); timer = nil
+        timerID += 1
+        if let live = index {
+            index = nil
+            try? await live.close()  // records today's history
         }
-        opening = task
-        let opened = await task.value
-        guard epoch == start else { return }
-        opening = nil
-        if let opened {
-            index = opened
-        } else {
-            activity = .idle
-        }
+        if !unmounting { activity = .idle }
     }
 
     private func refresh() async {
@@ -91,51 +125,19 @@ public final class DriveController: ObservableObject {
         if days == period { summary = fresh }
     }
 
-    public func cool() async {
-        timer?.cancel(); timer = nil
-        await closeIndex()
-        if activity != .offline { activity = .idle }
-    }
-
-    /// Closes the index (which records today's history), including one still opening.
-    private func closeIndex() async {
-        epoch += 1
-        var live = index
-        index = nil
-        if let task = opening {
-            opening = nil
-            live = await task.value ?? live
-        }
-        try? await live?.close()
-    }
-
-    public func recordDailyHistoryIfNeeded() async {
-        guard volume.isInternalData, index == nil, activity != .offline else { return }
-        let today = Day(.now, calendar: .current)
-        if let days = try? HistoryStore(directory: store.appending(path: "history")).days(), days.contains(today) {
-            return
-        }
-        await warm()
-        await cool()
-    }
-
-    public func willUnmount() async {
-        timer?.cancel(); timer = nil
-        await closeIndex()
-        activity = .offline
-    }
-
-    public func refreshSpace() {
-        if let s = try? VolumeSpace.read(volume.url) { space = s }
-    }
-
     private func restartTimer() {
         timer?.cancel()
+        timerID += 1
+        let id = timerID
         let delay = coolDown
         timer = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
-            await self?.cool()
+            await self?.run {
+                // A newer warm() or an explicit cool() supersedes this timer.
+                guard let self, self.timerID == id else { return }
+                await self.coolBody()
+            }
         }
     }
 }
