@@ -40,9 +40,17 @@ public actor LiveIndex {
     private var generation = 0
     private var subscribers: [UUID: AsyncStream<Int>.Continuation] = [:]
     var kindsComputations = 0
+    /// Folders relisted by `apply` (not by exclusion changes or scans).
+    var relistCount = 0
+    /// Relative paths the index leaves out; what the index currently reflects.
+    private var exclusions: Set<String>
+    /// What `exclusions.json` last held, so a save rewrites it only when it differs.
+    private var writtenExclusions: Set<String>?
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    public init(volumeRoot: URL, store: URL, saveDebounce: Duration = .seconds(30), compactAbove: Double = 0.25) {
+    public init(volumeRoot: URL, store: URL, saveDebounce: Duration = .seconds(30), compactAbove: Double = 0.25,
+                exclusions: Set<String> = []) {
+        self.exclusions = exclusions
         self.volumeRoot = volumeRoot
         self.store = store
         self.saveDebounce = saveDebounce
@@ -62,6 +70,60 @@ public actor LiveIndex {
     /// `base/Volumes/<uuid>/`; does not create it.
     public static func storeDirectory(base: URL, uuid: String) -> URL {
         base.appending(path: "Volumes").appending(path: uuid)
+    }
+
+    private static let exclusionsName = "exclusions.json"
+
+    /// The exclusions the stored snapshot was built with; empty when none were recorded.
+    private func storedExclusions() -> Set<String> {
+        guard let data = try? Data(contentsOf: store.appending(path: Self.exclusionsName)),
+              let paths = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return Set(paths)
+    }
+
+    private func writeExclusions() throws {
+        guard writtenExclusions != exclusions else { return }
+        let data = try JSONEncoder().encode(exclusions.sorted())
+        try data.write(to: store.appending(path: Self.exclusionsName), options: .atomic)
+        writtenExclusions = exclusions
+    }
+
+    /// Relists the parent of every added or removed exclusion that exists in the index, and scans
+    /// the folders that brings back. Never a full scan.
+    private func reconcile(from old: Set<String>, in index: ScanIndex) async throws {
+        var parents: Set<String> = []
+        for path in old.symmetricDifference(exclusions) {
+            parents.insert(path.lastIndex(of: "/").map { String(path[..<$0]) } ?? "")
+        }
+        var reader = BulkDirectoryReader()
+        var toScan: [FolderID] = []
+        for parent in parents.sorted() {
+            guard let folder = index.folder(atRelativePath: parent), !index.folders[Int(folder)].flags.contains(.garbage) else { continue }
+            toScan += try index.relist(reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder))
+        }
+        try fault?()
+        if !toScan.isEmpty { try await scan(index, starting: toScan) }
+    }
+
+    /// Changes the folders left out of the index. Relists only their parents; never a full scan.
+    public func setExclusions(_ paths: Set<String>) async throws {
+        await lock()
+        defer { unlock() }
+        guard !closed, let index, paths != exclusions else { return }
+        let old = exclusions
+        exclusions = paths
+        index.exclusions = paths
+        do {
+            try await reconcile(from: old, in: index)
+        } catch {
+            indexChanged()
+            needsFullRescan = true
+            unlink(store.appending(path: ScanIndex.snapshotName).path)
+            throw error
+        }
+        indexChanged()
+        try writeExclusions()
+        scheduleSave()
     }
 
     public func open() async throws -> OpenedFrom {
@@ -100,19 +162,24 @@ public actor LiveIndex {
             }
         }
 
+        let storedExclusions = self.storedExclusions()
         let opened: OpenedFrom
         if let reason {
             index = try await fullScan(device: device, journal: journal)
             opened = .fullScan(reason: reason)
         } else if let loaded, !loaded.pending.isEmpty {
             loaded.rootDevice = device
+            loaded.exclusions = exclusions
             index = loaded
             try await scan(loaded, starting: loaded.pending)
+            try await reconcile(from: storedExclusions, in: loaded)
             opened = .resumed
         } else {
             // st_dev changes when a drive is replugged or after a reboot.
             loaded?.rootDevice = device
+            loaded?.exclusions = exclusions
             index = loaded
+            if let loaded { try await reconcile(from: storedExclusions, in: loaded) }
             opened = .snapshot
         }
 
@@ -127,6 +194,7 @@ public actor LiveIndex {
 
         try startWatching(device: device)
         try saveLocked()
+        try writeExclusions()
         return opened
     }
 
@@ -163,7 +231,7 @@ public actor LiveIndex {
             var relists: Set<FolderID> = []
             var subtrees: Set<FolderID> = []
             for change in changes {
-                guard let relative = relativePath(change.path) else { continue }
+                guard let relative = relativePath(change.path), !isExcluded(relative) else { continue }
                 let folder = deepestFolder(relative, in: index)
                 if change.rescanSubtree { subtrees.insert(folder) } else { relists.insert(folder) }
             }
@@ -178,6 +246,7 @@ public actor LiveIndex {
             var reader = BulkDirectoryReader()
             for folder in relists where !index.folders[Int(folder)].flags.contains(.garbage) && !toScan.contains(folder) {
                 let listing = reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder)
+                relistCount += 1
                 toScan += try index.relist(listing)
             }
             try fault?()
@@ -329,6 +398,7 @@ public actor LiveIndex {
         fresh.rootPath = rootPath
         fresh.rootDevice = device
         fresh.fseventsUUID = journal
+        fresh.exclusions = exclusions
         // Events during the scan are replayed afterwards and re-list what they touch.
         fresh.lastEventID = FSEventsGetCurrentEventId()
         try await scan(fresh, starting: [0])
@@ -425,6 +495,11 @@ public actor LiveIndex {
         if normalized == rootPath { return "" }
         guard normalized.hasPrefix(rootPath + "/") || rootPath == "/" else { return nil }
         return String(normalized.dropFirst(rootPath == "/" ? 1 : rootPath.count + 1))
+    }
+
+    /// Whether `relative` is an excluded folder or lies under one.
+    private func isExcluded(_ relative: String) -> Bool {
+        exclusions.contains { relative == $0 || relative.hasPrefix($0 + "/") }
     }
 
     /// The deepest folder in the index on the way to `relative`.

@@ -343,3 +343,12 @@ private struct UnmountingTrash: TrashBackend {
     #expect(c.lens?.hits.map(\.path) == ["Users/u/Library/Developer/Xcode/DerivedData"])
     #expect(c.activity == .offline)
 }
+
+@MainActor @Test func exclusionsChangeTheSummary() async throws {
+    let root = try Fixtures.tree(["Users/u/Movies/m.mov": 3_000_000, "Users/u/VMs/v.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.warm()
+    await c.setExclusions(["Users/u/VMs"])
+    #expect(c.summary?.scannedBytes == Fixtures.allocatedSize(root.appending(path: "Users/u/Movies/m.mov")))
+    await c.cool()
+}

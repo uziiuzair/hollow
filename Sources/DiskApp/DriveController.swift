@@ -32,6 +32,8 @@ public final class DriveController: ObservableObject {
     public let volume: VolumeInfo
     private let store: URL
     private let coolDown: Duration
+    /// Relative paths the index leaves out; passed to every index this controller opens.
+    private var exclusions: Set<String>
     private var index: LiveIndex?
     private var timer: Task<Void, Never>?
     private var timerID = 0
@@ -65,7 +67,8 @@ public final class DriveController: ObservableObject {
 
     public var hasJournal: Bool { EventWatcher.journalUUID(device: volume.device) != nil }
 
-    public init(volume: VolumeInfo, store: URL, coolDown: Duration = .seconds(300)) {
+    public init(volume: VolumeInfo, store: URL, coolDown: Duration = .seconds(300), exclusions: Set<String> = []) {
+        self.exclusions = exclusions
         self.volume = volume
         self.store = store
         self.coolDown = coolDown
@@ -92,6 +95,23 @@ public final class DriveController: ObservableObject {
 
     public func cool() async {
         await run { await self.coolBody() }
+    }
+
+    /// Leaves these folders out of the index (relative paths). A cold drive picks them up on its next open;
+    /// an open one relists their parents, then recounts at once.
+    public func setExclusions(_ paths: Set<String>) async {
+        await run {
+            guard paths != self.exclusions else { return }
+            self.exclusions = paths
+            guard !self.unmounting, let index = self.index else { return }
+            do { try await index.setExclusions(paths) } catch {
+                Self.log.error("exclusions change failed: \(error.localizedDescription)")
+                return
+            }
+            await self.refresh()
+            guard !self.unmounting else { return }
+            await self.refreshLens(force: true)
+        }
     }
 
     public func recordDailyHistoryIfNeeded() async {
@@ -133,7 +153,7 @@ public final class DriveController: ObservableObject {
     private func warmBody() async {
         guard !unmounting else { return }
         if index == nil {
-            let live = LiveIndex(volumeRoot: volume.url, store: store)
+            let live = LiveIndex(volumeRoot: volume.url, store: store, exclusions: exclusions)
             // Without a snapshot or a journal, open() will do a full scan.
             activity = (snapshotExists && hasJournal) ? .opening : .scanning
             // Held so willUnmount() can cancel it (nothing suspends between the

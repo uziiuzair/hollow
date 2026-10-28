@@ -27,6 +27,20 @@ public final class ScanIndex {
     public var lastEventID: UInt64 = 0
     /// The volume's FSEvents journal UUID when this index was last current.
     public var fseventsUUID: String?
+    /// Folders (paths relative to the root, no leading or trailing "/") that listings leave out.
+    /// Not stored in the snapshot; the owner sets it after loading.
+    public var exclusions: Set<String> = [] {
+        didSet {
+            var map: [String: Set<String>] = [:]
+            for path in exclusions {
+                guard let slash = path.lastIndex(of: "/") else { map["", default: []].insert(path); continue }
+                map[String(path[..<slash]), default: []].insert(String(path[path.index(after: slash)...]))
+            }
+            excludedChildren = map
+        }
+    }
+    /// `exclusions` as parent relative path -> excluded child names.
+    private var excludedChildren: [String: Set<String>] = [:]
     public internal(set) var garbageFolders = 0
     public internal(set) var garbageFiles = 0
     public var scannedAt = Date()
@@ -74,9 +88,11 @@ public final class ScanIndex {
         var direct: UInt64 = 0
         var pass: Set<UInt64> = []
         folders[id].firstFile = FileIndex(files.count)
+        let skipped = excludedNames(in: listing.folder)
 
         for entry in listing.entries {
             if entry.kind == .directory {
+                if skipped?.contains(entry.name) == true { continue }
                 guard shouldDescend(entryDevice: entry.device, rootDevice: rootDevice, isMountPoint: entry.isMountPoint) else { continue }
                 // Directory hard links (HFS+ Time Machine backups): walk each once.
                 if entry.linkCount > 1, !claimHardLink(entry.inode, for: listing.folder, pass: &pass) { continue }
@@ -126,8 +142,10 @@ public final class ScanIndex {
         var newFolders: [FolderID] = []
         var newDirect: UInt64 = 0
         var pass: Set<UInt64> = []
+        let skipped = excludedNames(in: folder)
         for entry in listing.outcome == .ok ? listing.entries : [] {
             if entry.kind == .directory {
+                if skipped?.contains(entry.name) == true { continue }
                 guard shouldDescend(entryDevice: entry.device, rootDevice: rootDevice, isMountPoint: entry.isMountPoint) else { continue }
                 if let kept = oldChildren.removeValue(forKey: entry.name) {
                     children.append(kept)
@@ -187,7 +205,24 @@ public final class ScanIndex {
         return current
     }
 
+    /// The folder's path relative to the root ("" for the root).
+    public func relativePath(of folder: FolderID) -> String {
+        var parts: [String] = []
+        var cursor = folder
+        while cursor != 0 {
+            parts.append(folderName(cursor))
+            cursor = folders[Int(cursor)].parent
+        }
+        return parts.reversed().joined(separator: "/")
+    }
+
     // MARK: - Helpers
+
+    /// Names of `folder`'s excluded subfolders, nil when there are none. Pays for one
+    /// `relativePath(of:)` only when any exclusion is set.
+    private func excludedNames(in folder: FolderID) -> Set<String>? {
+        excludedChildren.isEmpty ? nil : excludedChildren[relativePath(of: folder)]
+    }
 
     /// Counts a hard link once: it belongs to the first folder that claims it. It can be
     /// claimed again once that folder is garbage, or by the same folder in a later
