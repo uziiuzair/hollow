@@ -76,8 +76,9 @@ public actor LiveIndex {
         let device = info.st_dev
         rootDevice = device
         let journal = EventWatcher.journalUUID(device: device)
-        let volumeURL = try URL(filePath: rootPath).resourceValues(forKeys: [.volumeURLKey]).volume ?? URL(filePath: "/")
-        mountPoint = volumeURL.path(percentEncoded: false).trimmingTrailingSlash()
+        // The device's real mount point ("/System/Volumes/Data" for the internal disk, where the
+        // volume URL says "/"): FSEvents device streams report paths relative to it.
+        mountPoint = EventPathMapper.mountPoint(of: rootPath) ?? "/"
 
         cachedKinds = nil
         var reason: String?
@@ -364,12 +365,20 @@ public actor LiveIndex {
         let watcher = EventWatcher(device: device, since: index.lastEventID)
         try watcher.start()
         self.watcher = watcher
-        let mount = mountPoint
+        let mapper = EventPathMapper(rootPath: rootPath, mountPoint: mountPoint)
         watchTask = Task { [weak self] in
             for await batch in watcher.changes {
-                let absolute = batch.map {
-                    FSChange(path: mount + "/" + $0.path, id: $0.id, rescanSubtree: $0.rescanSubtree, historyLost: $0.historyLost)
+                let absolute = batch.compactMap { change -> FSChange? in
+                    var path = mapper.absolute(change.path)
+                    // Lost history, or a rescan of a folder above the root, covers the whole root.
+                    if path == nil, change.historyLost || (change.rescanSubtree && mapper.isAncestorOfRoot(change.path)) {
+                        path = mapper.rootPath
+                    }
+                    return path.map {
+                        FSChange(path: $0, id: change.id, rescanSubtree: change.rescanSubtree, historyLost: change.historyLost)
+                    }
                 }
+                guard !absolute.isEmpty else { continue }
                 try? await self?.apply(absolute)
             }
         }
