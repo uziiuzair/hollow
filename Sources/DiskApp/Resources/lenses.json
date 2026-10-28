@@ -1,4 +1,6 @@
-{ "version": 1, "rules": [
+{ "version": 1,
+  "skipUnder": ["**/Backups.backupdb", "**/*.backupbundle", "**/*.sparsebundle", "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].backup", "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].previous", "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].inprogress"],
+  "rules": [
   {"id": "xcode-derived-data", "name": "Xcode DerivedData", "pattern": "Users/*/Library/Developer/Xcode/DerivedData", "safety": "regenerates", "explanation": "Xcode build products. Safe to clear. Rebuilds itself."},
   {"id": "xcode-archives", "name": "Xcode archive", "pattern": "Users/*/Library/Developer/Xcode/Archives/*", "safety": "review", "explanation": "Builds you archived for release. Keep the ones you may need to read crash reports."},
   {"id": "simulator-devices", "name": "Simulators", "pattern": "Users/*/Library/Developer/CoreSimulator", "safety": "app-managed", "explanation": "iOS simulators and their data.", "instruction": "Remove old ones in Xcode › Settings › Components."},

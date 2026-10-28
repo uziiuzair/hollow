@@ -135,3 +135,28 @@ import DiskEngine
     #expect(LensMatcher.report(index: idx, rules: rules).hits.map(\.path) == ["Users/a/proj/node_modules"])
 }
 
+// Final review M10: nothing inside a Time Machine backup is offered for the Trash, by any rule.
+@Test func timeMachineBackupsAreNeverHits() async throws {
+    let rules = LensRules.bundled
+    for path in ["Backups.backupdb/Mac/2026-01-01/Users/a/p/node_modules",
+                 "Backups.backupdb/Mac/2026-01-01/Macintosh HD/Users/a/Movies/x.fcpbundle/e/Render Files",
+                 "Backups.backupdb/Mac/Latest/Data/proj/CacheClip",
+                 "2026-01-01-120000.backup/Macintosh HD - Data/Users/a/p/node_modules",
+                 "2026-01-01-120000.previous/Data/p/node_modules",
+                 "2026-01-01-120000.inprogress/Data/p/node_modules",
+                 "nas/Mac.sparsebundle/p/node_modules", "nas/Mac.backupbundle/p/node_modules"] {
+        #expect(rules.rule(covering: path) == nil, "\(path)")
+    }
+    let idx = try await Fixtures.index([
+        "Backups.backupdb/Mac/2026-01-01/Users/a/p/node_modules/a.bin": 2_000_000,
+        "work/p/node_modules/b.bin": 2_000_000,
+    ])
+    #expect(LensMatcher.report(index: idx, rules: rules).hits.map(\.path) == ["work/p/node_modules"])
+}
+
+@Test func rulesFileGlobalSkipsApplyToEveryRule() throws {
+    let json = #"{"version": 1, "skipUnder": ["**/Backups.backupdb"], "rules": [{"id": "x", "name": "X", "pattern": "**/junk", "safety": "regenerates", "explanation": "E."}]}"#
+    let rules = try LensRules(json: Data(json.utf8))
+    #expect(rules.rule(covering: "a/junk")?.id == "x")
+    #expect(rules.rule(covering: "a/Backups.backupdb/b/junk") == nil)
+}

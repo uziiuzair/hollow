@@ -105,24 +105,31 @@ public struct LensRules: Sendable {
     public let rules: [LensRule]
     let patterns: [LensPattern]
     let skips: [[LensPattern]]
+    /// Folders no rule ever looks inside (Time Machine backups). A path one of these accepts kills every mask for its subtree.
+    let globalSkips: [LensPattern]
 
-    /// Rules with an unusable pattern (empty, or over 63 components) are dropped.
-    public init(rules: [LensRule]) {
+    /// Rules with an unusable pattern (empty, or over 63 components) are dropped, and so are unusable global skips.
+    public init(rules: [LensRule], skipUnder: [String] = []) {
         let valid = rules.filter { Self.isValid($0) }
         self.rules = valid
         patterns = valid.map { LensPattern($0.pattern) }
         skips = valid.map { ($0.skipUnder ?? []).map(LensPattern.init) }
+        globalSkips = skipUnder.map(LensPattern.init).filter(\.isValid)
     }
 
-    /// Reads `{"version": 1, "rules": [...]}`. Throws on any other version, or on a rule with an unusable pattern.
+    /// Reads `{"version": 1, "skipUnder": [...], "rules": [...]}`; the file-level `skipUnder` is optional and applies to every rule.
+    /// Throws on any other version, or on a rule or skip with an unusable pattern.
     public init(json: Data) throws {
-        struct File: Decodable { var version: Int; var rules: [LensRule] }
+        struct File: Decodable { var version: Int; var skipUnder: [String]?; var rules: [LensRule] }
         let file = try JSONDecoder().decode(File.self, from: json)
         guard file.version == 1 else { throw RulesError(message: "unsupported lenses.json version \(file.version)") }
         if let bad = file.rules.first(where: { !Self.isValid($0) }) {
             throw RulesError(message: "rule \(bad.id) has an unusable pattern")
         }
-        self.init(rules: file.rules)
+        if let bad = (file.skipUnder ?? []).first(where: { !LensPattern($0).isValid }) {
+            throw RulesError(message: "skip \(bad) is an unusable pattern")
+        }
+        self.init(rules: file.rules, skipUnder: file.skipUnder ?? [])
     }
 
     private static func isValid(_ rule: LensRule) -> Bool {
@@ -164,12 +171,21 @@ public struct LensRules: Sendable {
 
     var folderRuleIndices: [Int] { rules.indices.filter { !rules[$0].isFileRule } }
 
-    /// Masks for every rule's pattern, then every rule's skip patterns, flattened in rule order.
-    func startMasks() -> [UInt64] { patterns.map(\.start) + skips.flatMap { $0.map(\.start) } }
+    /// Masks for every rule's pattern, then every rule's skip patterns flattened in rule order, then the global skips.
+    func startMasks() -> [UInt64] {
+        patterns.map(\.start) + skips.flatMap { $0.map(\.start) } + globalSkips.map(\.start)
+    }
 
     /// One component down. A rule whose skip pattern accepts the new path is dead for the whole subtree: its masks go to 0.
+    /// A global skip that accepts the new path kills every mask.
     func step(_ masks: [UInt64], _ lowercasedName: String) -> [UInt64] {
         var next = [UInt64](repeating: 0, count: masks.count)
+        let globalBase = masks.count - globalSkips.count
+        for (k, skip) in globalSkips.enumerated() where masks[globalBase + k] != 0 {
+            let s = skip.step(masks[globalBase + k], lowercasedName)
+            if skip.accepts(s) { return [UInt64](repeating: 0, count: masks.count) }
+            next[globalBase + k] = s
+        }
         var skipBase = patterns.count
         for r in patterns.indices {
             defer { skipBase += skips[r].count }
