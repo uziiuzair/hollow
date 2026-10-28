@@ -374,3 +374,46 @@ private struct UnmountingTrash: TrashBackend {
     #expect(await allowed.buildMap(request)?.unreadableCount == 0)
     await allowed.cool()
 }
+
+/// Whether the probe has been asked, from any thread.
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock(); private var value = false
+    func set() { lock.withLock { value = true } }
+    var isSet: Bool { lock.withLock { value } }
+}
+
+// Task 7 review: the unreadable-folder retry after an open is not `opening`, so willUnmount must cancel it on its own,
+// or an eject waits for the whole retry scan. A cut-short retry stays resumable.
+@MainActor @Test func willUnmountCancelsTheUnreadableRetry() async throws {
+    let root = try wideTree(outer: 300, inner: 100)
+    let base = root.path
+    let locked = base + "/locked"
+    mkdir(locked, 0o755)
+    // Move the wide tree under one folder that is unreadable at the first scan.
+    for i in 0..<300 { rename(base + "/d\(i)", locked + "/d\(i)") }
+    defer { chmod(locked, 0o755) }
+    let store = try Fixtures.tempDir()
+    chmod(locked, 0)
+    let first = DriveController(volume: try Fixtures.volume(root), store: store)
+    await first.warm(); await first.cool()
+    chmod(locked, 0o755)
+
+    let probed = Flag()
+    let c = DriveController(volume: try Fixtures.volume(root), store: store, fullDiskAccess: { probed.set(); return true })
+    let warming = Task { await c.warm() }
+    for _ in 0..<2_000 where !probed.isSet { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(probed.isSet)
+    // Let the retry get into its scan.
+    try await Task.sleep(for: .milliseconds(50))
+    let clock = ContinuousClock()
+    let started = clock.now
+    await c.willUnmount()
+    let unmountTook = clock.now - started
+    await warming.value
+    #expect(c.activity == .offline)
+    let saved = try ScanIndex.load(from: store)
+    #expect(!saved.pending.isEmpty, "the retry ran to the end instead of stopping")
+
+    let fullScan = try await DiskScanner(root: root, storage: try Fixtures.tempDir()).run().elapsed
+    #expect(unmountTook < fullScan, "unmount took \(unmountTook), a full scan \(fullScan)")
+}

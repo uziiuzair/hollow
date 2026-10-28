@@ -42,6 +42,8 @@ public final class DriveController: ObservableObject {
     private var unmounting = false
     /// The open in progress, so an unmount can cut its scan short.
     private var opening: Task<OpenedFrom, any Error>?
+    /// The retry of unreadable folders after an open, so an unmount can cut its scan short too (it stays resumable).
+    private var retrying: Task<Void, Never>?
     private var spaceRead: Task<Void, Never>?
     /// Every warm/cool/unmount body runs through this chain, strictly one at a time.
     private var lifecycle: Task<Void, Never>?
@@ -138,6 +140,7 @@ public final class DriveController: ObservableObject {
         stopFlag.withLock { $0 = true }
         activity = .offline
         opening?.cancel()
+        retrying?.cancel()
         await run { await self.coolBody() }
     }
 
@@ -172,7 +175,11 @@ public final class DriveController: ObservableObject {
                 // Folders that were unreadable may be readable now. The probe runs off the main actor.
                 let probe = fullDiskAccess
                 if await Task.detached(operation: { probe() }).value, !unmounting {
-                    _ = try? await live.retryUnreadable()
+                    // Held so willUnmount() can cancel it (nothing suspends between the check and this assignment).
+                    let retry = Task { _ = try? await live.retryUnreadable() }
+                    retrying = retry
+                    await retry.value
+                    retrying = nil
                 }
                 let updates = await live.updates()
                 watching = Task { [weak self] in

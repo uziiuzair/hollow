@@ -136,7 +136,8 @@ public actor LiveIndex {
         var reader = BulkDirectoryReader()
         var readable = 0
         var toScan: [FolderID] = []
-        for id in 0..<index.folders.count {
+        // Cancelled (an unmount): the folders not yet relisted stay unreadable and are retried at the next open.
+        for id in 0..<index.folders.count where !Task.isCancelled {
             let flags = index.folders[id].flags
             guard flags.contains(.unreadable), !flags.contains(.garbage) else { continue }
             let folder = FolderID(id)

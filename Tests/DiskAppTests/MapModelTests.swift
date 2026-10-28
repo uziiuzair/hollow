@@ -159,3 +159,27 @@ import Testing
     #expect(published == 1)
     sub.cancel()
 }
+
+@MainActor @Test func reattachAfterRefusedEjectShowsTheMapAgain() async throws {
+    let src = try await FakeMapSource(["a/b/f.bin": 2_000_000, "a/c.bin": 1_200_000]); let m = model(src)
+    await m.open(path: "a", select: "a/b"); await m.settle()
+    m.driveDisconnected()
+    #expect(m.status == .offline && src.holds == 0)
+    let fresh = try await FakeMapSource(["a/b/f.bin": 2_000_000, "a/c.bin": 1_200_000])
+    await m.reattach(to: fresh); await m.settle()
+    #expect(m.status == .ready && fresh.holds == 1 && m.zoomPath == "a" && m.snapshot?.nodes[m.selected!].key == "a/b")
+    await m.reattach(to: src)
+    #expect(src.holds == 0 && fresh.holds == 1)
+}
+
+@MainActor @Test func reattachDoesNothingUnlessDisconnected() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src)
+    let other = try await FakeMapSource(["a/f.bin": 2_000_000])
+    // Never opened, then open and ready, then closed by the window: none of these is a disconnect.
+    await m.reattach(to: other)
+    await m.open(path: "", select: nil); await m.settle()
+    await m.reattach(to: other)
+    m.close()
+    await m.reattach(to: other)
+    #expect(other.holds == 0 && other.builds == 0)
+}

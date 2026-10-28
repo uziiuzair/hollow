@@ -32,7 +32,7 @@ public final class MapModel: ObservableObject {
     public var reduceMotion: Bool
 
     public let driveName: String
-    private let source: any MapSource
+    private var source: any MapSource
     private let throttle: Duration
     private let clock = ContinuousClock()
 
@@ -43,6 +43,10 @@ public final class MapModel: ObservableObject {
     /// Kept by key so the selection survives rebuilds.
     private var selectedKey: String?
     private var pendingZoom: PendingZoom?
+    /// Set by driveDisconnected(): the window still shows "<name> was disconnected" and may reattach.
+    private var disconnected = false
+    /// True from driveDisconnected() until a reattach or reopen.
+    public var isDisconnected: Bool { disconnected }
 
     /// The id of the latest request; only a build answering it is applied.
     private var latest = 0
@@ -95,6 +99,7 @@ public final class MapModel: ObservableObject {
         if snapshot == nil { status = Self.coldStatus(source.activity) }
         if !isOpen {
             isOpen = true
+            disconnected = false
             session += 1
             let mine = session
             await source.hold()
@@ -188,6 +193,17 @@ public final class MapModel: ObservableObject {
         guard isOpen else { return }
         close()
         status = .offline
+        disconnected = true
+    }
+
+    /// The eject was refused and the drive is still mounted, with a new controller: holds `source` and rebuilds at the
+    /// level and selection the window had. Does nothing unless the drive was disconnected (driveDisconnected()).
+    public func reattach(to source: any MapSource) async {
+        guard disconnected, !isOpen else { return }
+        disconnected = false
+        self.source = source
+        // close() already dropped any trailing build, the dirty flag and the throttle window, so this builds at once.
+        await open(path: zoomPath, select: selectedKey)
     }
 
     /// Waits until no build is in flight or scheduled.

@@ -15,6 +15,8 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     private(set) weak var driveController: DriveController?
     var onClose: (() -> Void)?
     var onFirstFrame: (() -> Void)?
+    /// Fires each time the window becomes key: the app checks whether a refused eject left the drive mounted.
+    var onBecameKey: (() -> Void)?
 
     private var model: MapModel?
     private var ui: MapWindowState?
@@ -23,6 +25,8 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     /// This drive's basket; it outlives the window (the store keeps it until the drive is gone).
     let basket: Basket
     private var subscriptions: Set<AnyCancellable> = []
+    /// The sinks on `driveController`, replaced by a reattach.
+    private var controllerSubscriptions: Set<AnyCancellable> = []
     private var keyMonitor: Any?
     private var displayObserver: NSObjectProtocol?
 
@@ -101,20 +105,22 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         model?.driveDisconnected()
     }
 
+    /// The eject was refused and the drive is still mounted with a new controller: binds to it and shows the map again
+    /// at the same folder. Does nothing unless the window says the drive was disconnected.
+    func reattach(controller: DriveController) async {
+        guard let model, let ui, model.isDisconnected, driveController !== controller else { return }
+        // Set at once, so a second sync before the map is back does not reattach again.
+        driveController = controller
+        controllerSubscriptions.removeAll()
+        observeController(controller, model: model, ui: ui)
+        Task { await controller.refreshSpace() }
+        await model.reattach(to: controller)
+    }
+
     // MARK: Glue
 
     private func observe(_ controller: DriveController, model: MapModel, ui: MapWindowState) {
-        // C5: @Published fires on willSet; hop a turn so the model reads the new values.
-        Publishers.Merge3(controller.$generation.dropFirst().map { _ in () },
-                          controller.$activity.dropFirst().map { _ in () },
-                          controller.$period.dropFirst().map { _ in () })
-            .receive(on: DispatchQueue.main)
-            .sink { [weak model] in model?.sourceChanged() }
-            .store(in: &subscriptions)
-        controller.$space
-            .receive(on: DispatchQueue.main)
-            .sink { [weak ui] space in ui?.free = space.map { Format.gb($0.availableForImportantUsage) + " free" } }
-            .store(in: &subscriptions)
+        observeController(controller, model: model, ui: ui)
         model.$selected
             .receive(on: DispatchQueue.main)
             .sink { _ in
@@ -129,6 +135,20 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
                 model?.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             }
         }
+    }
+
+    private func observeController(_ controller: DriveController, model: MapModel, ui: MapWindowState) {
+        // C5: @Published fires on willSet; hop a turn so the model reads the new values.
+        Publishers.Merge3(controller.$generation.dropFirst().map { _ in () },
+                          controller.$activity.dropFirst().map { _ in () },
+                          controller.$period.dropFirst().map { _ in () })
+            .receive(on: DispatchQueue.main)
+            .sink { [weak model] in model?.sourceChanged() }
+            .store(in: &controllerSubscriptions)
+        controller.$space
+            .receive(on: DispatchQueue.main)
+            .sink { [weak ui] space in ui?.free = space.map { Format.gb($0.availableForImportantUsage) + " free" } }
+            .store(in: &controllerSubscriptions)
     }
 
     // MARK: Keys
@@ -516,6 +536,10 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         ui?.tint = Palette.tints[index % Palette.tints.count]
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        onBecameKey?()
+    }
+
     func windowWillClose(_ notification: Notification) {
         if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.isVisible,
            panel.dataSource === self {
@@ -526,6 +550,7 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         if let displayObserver { NSWorkspace.shared.notificationCenter.removeObserver(displayObserver) }
         displayObserver = nil
         subscriptions.removeAll()
+        controllerSubscriptions.removeAll()
         model?.close()
         window?.contentView = nil
         model = nil

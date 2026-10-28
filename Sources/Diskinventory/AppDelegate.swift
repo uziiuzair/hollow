@@ -56,6 +56,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var debugSnapshotDir: URL?
     #endif
     private let mapLog = Logger(subsystem: AppIdentity.bundleID, category: "map")
+    /// Holds a Finder eject (at most 2 s) while the drive's index closes; fed by every external controller's activity.
+    private var unmountGate: UnmountGate?
+    private var unmountApprover: UnmountApprover?
+    private var activitySinks: [ObjectIdentifier: AnyCancellable] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -98,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { self?.refresh() }
         }
         observeMounts()
+        startUnmountApproval()
 
         probeFullDiskAccess(explainIfDue: true)
 
@@ -165,6 +170,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
             let move = CommandLine.arguments.contains("--debug-basket-move")
             Task { [weak self] in await self?.debugBasket(to: dir, move: move) }
+        }
+        // --debug-open-map <mount point>: opens the map of a marked, mounted disk image, for the eject-hold check.
+        if let i = CommandLine.arguments.firstIndex(of: "--debug-open-map"), i + 1 < CommandLine.arguments.count {
+            let volume = CommandLine.arguments[i + 1]
+            Task { [weak self] in await self?.debugOpenMap(volume) }
         }
         #endif
     }
@@ -255,7 +265,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selected = internalUUID ?? registry.all().first?.uuid ?? ""
             observeSelected()
         }
+        watchActivity()
         rebuild()
+        // A refused eject left the drive mounted with a new controller: the map window shows it again (Decision 24).
+        if let window = mapWindow, let c = controllers[window.uuid], unmounts[window.uuid] == nil,
+           window.driveController !== c {
+            Task { await window.reattach(controller: c) }
+        }
+    }
+
+    // MARK: Unmount hold
+
+    private func startUnmountApproval() {
+        let gate = UnmountGate { [weak self] path in
+            await MainActor.run { self?.uuid(forVolumePath: path).flatMap { self?.beginUnmount($0) } }?.value
+        }
+        let approver = UnmountApprover(gate: gate, log: Logger(subsystem: AppIdentity.bundleID, category: "drives"))
+        unmountGate = gate
+        unmountApprover = approver
+        watchActivity()
+        approver.start()
+    }
+
+    /// One sink per external controller; the gate always knows which drives have an open index.
+    private func watchActivity() {
+        guard unmountGate != nil else { return }
+        var live: [ObjectIdentifier: DriveController] = [:]
+        for c in controllers.values where !c.volume.isInternalData { live[ObjectIdentifier(c)] = c }
+        activitySinks = activitySinks.filter { live[$0.key] != nil }
+        for (id, c) in live where activitySinks[id] == nil {
+            // @Published fires on willSet; hop a turn so the read sees the new value.
+            activitySinks[id] = c.$activity.receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.updateOpenDrives() }
+        }
+        updateOpenDrives()
+    }
+
+    /// Drives with an open index, and drives whose close is still running: the system's willUnmount notification comes
+    /// before the approval callback and turns the drive offline at once, but its index may not have closed yet.
+    private func updateOpenDrives() {
+        let open = controllers.filter { uuid, c in
+            !c.volume.isInternalData
+                && ([.opening, .scanning, .ready].contains(c.activity) || (unmounts[uuid] != nil && unmountFinished[uuid] == nil))
+        }.values
+        unmountGate?.setOpen(Set(open.map { $0.volume.url.resolvingSymlinksInPath().path }))
+    }
+
+    /// The external drive mounted at `path` (C14).
+    private func uuid(forVolumePath path: String) -> String? {
+        var path = path
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        return controllers.first { _, c in
+            !c.volume.isInternalData && c.volume.url.resolvingSymlinksInPath().path == real
+        }?.key
     }
 
     /// The skipped folders as paths relative to this volume's root.
@@ -295,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // willUnmount saves the index; whatever was cached before is stale.
             self.cachedSummaries[uuid] = nil
             if self.unmounts[uuid] != nil { self.unmountFinished[uuid] = Date() }
+            self.updateOpenDrives()
             self.rebuild()
         }
         unmounts[uuid] = task
@@ -597,6 +661,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func debugOpenMap(_ volume: String) async {
+        let isImage = await Task.detached { Self.isMountedDiskImage(at: volume) }.value
+        var marker = stat()
+        let hasMarker = lstat(volume + "/" + Self.debugBasketMarker, &marker) == 0 && (marker.st_mode & S_IFMT) == S_IFREG
+        guard isImage, hasMarker, let uuid = uuid(forVolumePath: volume) else {
+            mapLog.error("debug-open-map: refused, \(volume, privacy: .public) is not a marked, mounted disk image")
+            return
+        }
+        mapLog.info("debug-open-map: \(volume, privacy: .public) opened \(self.openMap(uuid: uuid, focus: "d1"))")
+    }
+
     private func debugBasket(to dir: URL, move: Bool) async {
         let url = URL(fileURLWithPath: Self.debugBasketVolume)
         let values = try? url.resourceValues(forKeys: [.volumeIsInternalKey, .volumeIsEjectableKey, .volumeURLKey])
@@ -769,6 +844,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // The Dock icon shows only while a window is open (spec 5).
                 self.updateActivationPolicy()
             }
+            window.onBecameKey = { [weak self] in self?.syncVolumes() }
             window.onFirstFrame = { [weak self] in
                 let ms = (clock.now - started) / .milliseconds(1)
                 self?.mapLog.info("first map frame in \(Int(ms)) ms")
@@ -816,6 +892,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !terminating else { return .terminateLater }
         terminating = true
         let all = Array(controllers.values)
+        unmountApprover?.stop()
         Task { [weak self] in
             await withTaskGroup(of: Void.self) { group in
                 for c in all { group.addTask { await c.cool() } }
