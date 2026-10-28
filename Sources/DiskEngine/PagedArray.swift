@@ -8,6 +8,9 @@ public struct PagedArray<Element>: RandomAccessCollection, MutableCollection {
 
     public init() {}
 
+    /// Elements the allocated pages can hold.
+    public var capacity: Int { pages.count * Self.pageSize }
+
     public var startIndex: Int { 0 }
     public var endIndex: Int { count }
 
