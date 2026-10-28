@@ -41,7 +41,7 @@ public final class ScanIndex {
     }
     /// `exclusions` as parent relative path -> excluded child names.
     private var excludedChildren: [String: Set<String>] = [:]
-    /// Big folders' subfolders by name, built when a lookup in one misses and dropped whenever its children change, so a
+    /// Big folders' subfolders by name, built when a lookup passes many and dropped whenever its children change, so a
     /// temp folder with 20,000 entries isn't passed over for every event under it. At most `maxTabled` names in all.
     private var childTables: [FolderID: [String: FolderID]] = [:]
     private var tabledNames = 0
@@ -248,23 +248,19 @@ public final class ScanIndex {
 
     /// The folder at a path relative to `rootPath` ("" is the root), or nil.
     public func folder(atRelativePath path: String) -> FolderID? {
-        var current: FolderID = 0
-        for part in path.split(separator: "/", omittingEmptySubsequences: true) {
-            guard let child = child(named: part, of: current) else { return nil }
-            current = child
-        }
-        return current
+        let found = deepestFolder(onRelativePath: path)
+        return found.whole ? found.folder : nil
     }
 
-    /// The deepest folder in the index on the way to a path relative to `rootPath` ("" is the root): one walk down,
-    /// so a missing child costs one pass over its parent's subfolders.
-    public func deepestFolder(onRelativePath path: String) -> FolderID {
+    /// The deepest folder in the index on the way to a path relative to `rootPath` ("" is the root), found in one walk
+    /// down, and whether it is the whole path.
+    public func deepestFolder(onRelativePath path: String) -> (folder: FolderID, whole: Bool) {
         var current: FolderID = 0
         for part in path.split(separator: "/", omittingEmptySubsequences: true) {
-            guard let child = child(named: part, of: current) else { return current }
+            guard let child = child(named: part, of: current) else { return (current, false) }
             current = child
         }
-        return current
+        return (current, true)
     }
 
     /// `folder`'s subfolder named `name`, or nil. An ASCII name is matched on its bytes, read in place: a lookup passes
@@ -286,15 +282,12 @@ public final class ScanIndex {
                 passed += 1
             }
         }
-        guard child != noFolder else {
-            if passed > Self.tableAbove { tableChildren(of: folder) }
-            return nil
-        }
-        return child
+        if passed > Self.tableAbove { tableChildren(of: folder) }
+        return child == noFolder ? nil : child
     }
 
-    /// After a miss in a folder with more than `tableAbove` subfolders: its subfolders by name. The first of two equal
-    /// names wins, as in a pass over the siblings.
+    /// After a lookup passed more than `tableAbove` of a folder's subfolders: its subfolders by name. The first of two
+    /// equal names wins, as in a pass over the siblings.
     private func tableChildren(of folder: FolderID) {
         var table: [String: FolderID] = [:]
         var child = folders[Int(folder)].firstChildFolder

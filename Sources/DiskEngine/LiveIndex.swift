@@ -544,7 +544,7 @@ public actor LiveIndex {
         let ends = waiting.map { $0.last + $0.window } + staleRetry.values
         let end = ends.min() ?? now
         let delay = max(end - now, .zero)
-        flushTask = Task { [weak self] in
+        flushTask = Task(priority: .utility) { [weak self] in
             try? await Task.sleep(for: delay)
             await self?.flushFromTimer()
         }
@@ -676,10 +676,11 @@ public actor LiveIndex {
             var subtrees: Set<FolderID> = []
             for change in changes {
                 guard let relative = relativePath(change.path), !isExcluded(relative) else { continue }
+                let deepest = index.deepestFolder(onRelativePath: relative)
                 // A routed folder gone from the index was removed by its parent's relist since, which covers it:
                 // relisting the parent again would only repeat that.
-                if routed, !change.rescanSubtree, index.folder(atRelativePath: relative) == nil { continue }
-                let folder = listable(deepestFolder(relative, in: index), in: index)
+                if routed, !change.rescanSubtree, !deepest.whole { continue }
+                let folder = listable(deepest.folder, in: index)
                 #if DEBUG
                 if change.rescanSubtree && folder == 0 {
                     Self.log.info("rescan of the root: \(change.path, privacy: .public) id \(change.id)")
@@ -1008,7 +1009,8 @@ public actor LiveIndex {
         try watcher.start()
         self.watcher = watcher
         let mapper = EventPathMapper(rootPath: rootPath, mountPoint: mountPoint)
-        watchTask = Task { [weak self] in
+        // Applies are background work: utility, below the watcher's callback queue and the UI.
+        watchTask = Task(priority: .utility) { [weak self] in
             for await batch in watcher.changes {
                 let absolute = batch.compactMap { change -> FSChange? in
                     var path = mapper.absolute(change.path)
@@ -1029,7 +1031,7 @@ public actor LiveIndex {
     private func scheduleSave() {
         guard saveTask == nil else { return }
         let delay = saveDebounce
-        saveTask = Task { [weak self] in
+        saveTask = Task(priority: .utility) { [weak self] in
             try? await Task.sleep(for: delay)
             await self?.saveFromTimer()
         }
@@ -1078,7 +1080,8 @@ public actor LiveIndex {
     /// to it. `path` itself when it is outside the root or excluded, or before `open()`.
     private func folderKey(_ path: String) -> String {
         guard let index, let relative = relativePath(path), !isExcluded(relative) else { return path }
-        return index.path(of: listable(deepestFolder(relative, in: index), in: index), rootPath: index.rootPath)
+        let folder = listable(index.deepestFolder(onRelativePath: relative).folder, in: index)
+        return index.path(of: folder, rootPath: index.rootPath)
     }
 
     #if DEBUG
@@ -1098,11 +1101,6 @@ public actor LiveIndex {
         activitySince = now
     }
     #endif
-
-    /// The deepest folder in the index on the way to `relative`.
-    private func deepestFolder(_ relative: String, in index: ScanIndex) -> FolderID {
-        index.deepestFolder(onRelativePath: relative)
-    }
 
     private func depth(_ folder: FolderID, _ index: ScanIndex) -> Int {
         var depth = 0

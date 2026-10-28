@@ -193,7 +193,9 @@ public final class DirectoryLister: @unchecked Sendable {
                     running += 1
                     let thread = Thread { self.serve() }
                     thread.name = "DirectoryLister"
-                    thread.qualityOfService = .userInitiated
+                    // Below EventWatcher's callback queue: a busy pool must not delay the callback until fseventsd
+                    // drops events (a full rescan), nor compete with the UI.
+                    thread.qualityOfService = .utility
                     thread.start()
                 }
                 condition.signal()

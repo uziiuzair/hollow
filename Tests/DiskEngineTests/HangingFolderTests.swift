@@ -705,3 +705,19 @@ private func drip(_ seconds: Double) -> @Sendable (String, FolderID, @escaping @
     #expect(start <= FSEventsGetCurrentEventId())
     try await live.close()
 }
+
+// Task 10d: listing is background work. Its threads run below the watcher's callback queue (userInitiated), so a busy
+// listing pool can't delay the callback until fseventsd drops events (which costs a full rescan), nor compete with the UI.
+@Test func listingThreadsRunAtUtility() async throws {
+    let seen = OSAllocatedUnfairLock<qos_class_t?>(initialState: nil)
+    let folders = DirectoryLister(read: { _, folder, opened in
+        opened()
+        seen.withLock { $0 = qos_class_self() }
+        return DirectoryListing(folder: folder, outcome: .ok, entries: [])
+    })
+    guard case .listed = await folders.list(path: "/anything", folder: 0) else {
+        Issue.record("not listed")
+        return
+    }
+    #expect(seen.withLock { $0 } == QOS_CLASS_UTILITY)
+}

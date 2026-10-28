@@ -74,8 +74,10 @@ import Testing
     #expect(idx.folder(atRelativePath: "tm") == nil)
     // The decomposed spelling finds the composed name, as before.
     #expect(idx.folder(atRelativePath: "cafe\u{301}").map(idx.folderName) == "caf\u{E9}")
-    #expect(idx.deepestFolder(onRelativePath: "tmp/new/deeper") == idx.folder(atRelativePath: "tmp"))
-    #expect(idx.deepestFolder(onRelativePath: "gone/x") == 0)
+    #expect(idx.deepestFolder(onRelativePath: "tmp/new/deeper").folder == idx.folder(atRelativePath: "tmp"))
+    #expect(idx.deepestFolder(onRelativePath: "tmp/new/deeper").whole == false)
+    #expect(idx.deepestFolder(onRelativePath: "tmp") == (idx.folder(atRelativePath: "tmp")!, true))
+    #expect(idx.deepestFolder(onRelativePath: "gone/x").folder == 0)
 }
 
 // A folder with many subfolders is looked up by name through a table that follows every change to its children.
@@ -86,15 +88,20 @@ import Testing
     _ = try idx.integrate(DirectoryListing(folder: 0, outcome: .ok, entries: names.map { .dir($0) }), rootDevice: 1)
     #expect(idx.folder(atRelativePath: "nope") == nil)
     #expect(idx.childLookupTables == 1)
+    // A hit far down the siblings tables them too.
+    idx.resetContents(of: 0)
+    _ = try idx.integrate(DirectoryListing(folder: 0, outcome: .ok, entries: names.map { .dir($0) }), rootDevice: 1)
+    #expect(idx.childLookupTables == 0)
     let kept = try #require(idx.folder(atRelativePath: "d2999"))
     #expect(idx.folderName(kept) == "d2999")
+    #expect(idx.childLookupTables == 1)
     // d0 goes, "new" comes: both lookups see it at once.
     let after = names.dropFirst() + ["new"]
     _ = try idx.relist(DirectoryListing(folder: 0, outcome: .ok, entries: after.map { .dir($0) }))
     #expect(idx.folder(atRelativePath: "d0") == nil)
     #expect(idx.folder(atRelativePath: "new").map(idx.folderName) == "new")
     #expect(idx.folder(atRelativePath: "d2999") == kept)
-    #expect(idx.deepestFolder(onRelativePath: "d0/x") == 0)
+    #expect(idx.deepestFolder(onRelativePath: "d0/x").folder == 0)
     idx.resetContents(of: 0)
     #expect(idx.folder(atRelativePath: "new") == nil)
     #expect(idx.childLookupTables == 0)
