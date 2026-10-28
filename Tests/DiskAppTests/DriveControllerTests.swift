@@ -207,12 +207,11 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
     let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
     await c.hold()
     let request = MapRequest(path: "", size: CGSize(width: 400, height: 300), period: 7)
-    // The first build caches the baseline, so the next one goes straight to the index read.
     #expect(await c.buildMap(request) != nil)
-    let build = Task { await c.buildMap(request) }
-    await Task.yield()
-    await c.willUnmount()
-    #expect(await build.value == nil)
+    // The unmount begins while the build is reading the index.
+    c.afterMapRead = { await c.willUnmount() }
+    #expect(await c.buildMap(request) == nil)
+    #expect(c.activity == .offline)
 }
 
 // A drive with no history has no baseline; that answer is cached too.

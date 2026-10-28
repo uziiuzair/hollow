@@ -40,6 +40,8 @@ public final class DriveController: ObservableObject {
     /// Counts the open index's updates into `generation`; lives from open to close.
     private var watching: Task<Void, Never>?
     private(set) var cachedBaseline: (period: Int, day: Day, snapshot: SizeSnapshot?)?
+    /// Tests only: runs between a map build's index read and its unmount check.
+    var afterMapRead: (() async -> Void)?
 
     public var hasJournal: Bool { EventWatcher.journalUUID(device: volume.device) != nil }
 
@@ -202,6 +204,7 @@ extension DriveController: MapSource {
         let baseline = await baseline(days: request.period, from: index)
         guard !unmounting else { return nil }
         let map = try? await index.read { MapBuilder.build(index: $0, request: request, baseline: baseline) }
+        await afterMapRead?()
         // An unmount that began during the read: its map must not land.
         guard !unmounting else { return nil }
         return map
