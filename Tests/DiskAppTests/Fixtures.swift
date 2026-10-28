@@ -52,3 +52,10 @@ extension Fixtures {
                            availableForImportantUsage: freeGB * gb)
     }
 }
+
+extension Fixtures {
+    /// Scans a tree built from `spec` and returns its index.
+    static func index(_ spec: [String: Int]) async throws -> ScanIndex {
+        try await DiskScanner(root: try tree(spec), storage: try tempDir()).run().index
+    }
+}
