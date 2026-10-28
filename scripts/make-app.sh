@@ -9,6 +9,8 @@ CONFIG="${1:-debug}"
 case "$CONFIG" in debug|release) ;; *) echo "usage: $0 [debug|release]" >&2; exit 2 ;; esac
 
 cd "$(dirname "$0")/.."
+VERSION="${VERSION:-0.1}"
+BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD)}"
 swift build -c "$CONFIG" --product "$NAME"
 BIN="$(swift build -c "$CONFIG" --show-bin-path)/$NAME"
 
@@ -28,13 +30,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$NAME</string>
     <key>CFBundleExecutable</key><string>$NAME</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+    <key>NSHumanReadableCopyright</key><string>© 2026 ooozzy</string>
     <key>LSUIElement</key><true/>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict>
 </plist>
 PLIST
 
-codesign --force --sign - --deep "$APP"
+codesign --force --sign - --deep --options runtime --entitlements scripts/Diskinventory.entitlements "$APP"
 echo "Built $APP"
