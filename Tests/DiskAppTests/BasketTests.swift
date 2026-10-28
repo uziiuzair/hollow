@@ -148,7 +148,7 @@ let dockerHit = LensHit(ruleID: "docker", path: "Users/u/Library/Containers/com.
     #expect(b.accepts(item("c", 1)) && b.accepts(item("ab", 1)))
 }
 
-private func level(_ nodes: [MapNode], sizes: [UInt64]) -> MapSnapshot {
+func level(_ nodes: [MapNode], sizes: [UInt64]) -> MapSnapshot {
     let rects = sizes.map { TreemapRect(ref: .folder(1), size: $0, frame: .zero, depth: 1, parent: -1) }
     return MapSnapshot(path: "", rootPath: "/", crumbs: [], total: 0, period: 7,
                        layout: TreemapLayout(rects: rects, bounds: .zero, topLevelCount: rects.count), nodes: nodes, list: [])

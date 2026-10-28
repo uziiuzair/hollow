@@ -18,10 +18,10 @@ import DiskEngine
 }
 
 @Test func onlyADoubleClickOnAFolderOpensIt() {
-    #expect(MapClick.opensFolder(clickCount: 2, isFolder: true, dragActive: false))
-    #expect(!MapClick.opensFolder(clickCount: 1, isFolder: true, dragActive: false))
-    #expect(!MapClick.opensFolder(clickCount: 2, isFolder: false, dragActive: false))
-    #expect(!MapClick.opensFolder(clickCount: 2, isFolder: true, dragActive: true))
+    #expect(MapClick.opensFolder(clickCount: 2, isFolder: true))
+    #expect(!MapClick.opensFolder(clickCount: 1, isFolder: true))
+    #expect(!MapClick.opensFolder(clickCount: 3, isFolder: true))
+    #expect(!MapClick.opensFolder(clickCount: 2, isFolder: false))
 }
 
 private func node(folder: Bool, kind: ContentKind? = .documents) -> MapNode {
@@ -50,4 +50,15 @@ private func node(folder: Bool, kind: ContentKind? = .documents) -> MapNode {
 
 @Test func aBucketGetsNoMenu() {
     #expect(MapContextMenu.items(for: node(folder: false, kind: nil), canBasket: false, moving: false).isEmpty)
+}
+
+@Test func aMenuTargetFollowsItsKeyThroughARebuild() {
+    let a = MapNode(key: "Users/u/a", name: "a", kind: .other, growth: 0, isFolder: true)
+    let b = MapNode(key: "Users/u/b", name: "b", kind: .media, growth: 0, isFolder: false)
+    let small = MapNode(key: "Users/u#small", name: "Small files", kind: nil, growth: 0, isFolder: false)
+    #expect(level([a, b], sizes: [9, 5]).topLevelRect(forKey: "Users/u/a") == 0)
+    // Rebuilt while the menu was open: a moved to rect 1, so the old index would now be b.
+    #expect(level([b, a], sizes: [12, 9]).topLevelRect(forKey: "Users/u/a") == 1)
+    // Gone from this level: nothing to act on.
+    #expect(level([b, small], sizes: [12, 1]).topLevelRect(forKey: "Users/u/a") == nil)
 }

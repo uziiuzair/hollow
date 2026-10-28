@@ -11,7 +11,7 @@ final class TreemapMTKView: MTKView {
     var onDoubleClick: ((CGPoint) -> Void)?
     /// The right-click menu for the block under the point, or nil for none.
     var onContextMenu: ((CGPoint) -> NSMenu?)?
-    /// A trackpad swipe back (two fingers, to the right).
+    /// A three-finger trackpad swipe to the right (`swipe(with:)`); a two-finger scroll swipe is not tracked.
     var onBack: (() -> Void)?
     var onResize: ((CGSize) -> Void)?
     /// A press that moved `BasketDrag.threshold` points or more; locations are in the window's content, top-left origin.
@@ -58,6 +58,11 @@ final class TreemapMTKView: MTKView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         drag = nil
+        // Control-click is a right-click: show the menu rather than start a drag.
+        if event.modifierFlags.contains(.control) {
+            if let menu = onContextMenu?(point(event)) { NSMenu.popUpContextMenu(menu, with: event, for: self) }
+            return
+        }
         guard let snapshot, let hit = snapshot.layout.hitTest(point(event)), let content = contentPoint(event) else { return }
         let top = snapshot.layout.topLevel(of: hit)
         drag = BasketDrag(at: content, item: top, key: snapshot.nodes.indices.contains(top) ? snapshot.nodes[top].key : nil)
@@ -139,7 +144,7 @@ final class TreemapMTKView: MTKView {
         let p = point(event)
         guard bounds.contains(p) else { return }
         onClick?(p)
-        if event.clickCount >= 2 { onDoubleClick?(p) }
+        if event.clickCount == 2 { onDoubleClick?(p) }
     }
 
     /// The event in the window's content view, top-left origin: the SwiftUI window's "mapWindow" coordinate space.

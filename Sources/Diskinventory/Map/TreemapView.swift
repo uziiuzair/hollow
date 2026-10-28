@@ -53,8 +53,8 @@ struct TreemapView: NSViewRepresentable {
             view.onDoubleClick = { [weak model] p in
                 guard let model, let snapshot = model.snapshot, let hit = snapshot.layout.hitTest(p) else { return }
                 let top = snapshot.layout.topLevel(of: hit)
-                // The view sends no double-click for a drag.
-                if MapClick.opensFolder(clickCount: 2, isFolder: snapshot.nodes[top].isFolder, dragActive: false) {
+                // The view sends a double-click only for the second click, and never for a drag.
+                if MapClick.opensFolder(clickCount: 2, isFolder: snapshot.nodes[top].isFolder) {
                     model.zoomIn(top)
                 }
             }

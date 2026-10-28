@@ -93,9 +93,9 @@ public enum MapKey {
 }
 
 public enum MapClick {
-    /// A double-click on a folder opens it; a press that became a drag never counts as a click.
-    public static func opensFolder(clickCount: Int, isFolder: Bool, dragActive: Bool) -> Bool {
-        clickCount >= 2 && isFolder && !dragActive
+    /// A double-click on a folder opens it; a triple-click doesn't open it again.
+    public static func opensFolder(clickCount: Int, isFolder: Bool) -> Bool {
+        clickCount == 2 && isFolder
     }
 }
 

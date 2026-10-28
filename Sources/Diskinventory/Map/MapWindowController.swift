@@ -76,7 +76,7 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
             trash: { [weak self] items in await self?.moveToTrash(items) ?? .driveGone(items, protected: []) },
             protected: { [weak self] in self?.driveController?.protectedHits ?? [] },
             contextItems: { [weak self] in self?.contextItems(rect: $0) ?? [] },
-            chooseContext: { [weak self] in self?.chooseContext($0, rect: $1) })
+            chooseContext: { [weak self] in self?.chooseContext($0, key: $1) })
         let hosting = NSHostingView(rootView: MapWindowView(model: model, ui: ui, basket: basket, pointer: MapPointer(),
                                                             dragState: dragState, mapView: mapView, actions: actions))
         // The window, not the SwiftUI content, decides the window's size.
@@ -259,8 +259,9 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// Selects `rect`, then does `action`. "Move to Trash…" only queues the item and opens the review sheet.
-    private func chooseContext(_ action: MapContextAction, rect: Int) {
-        guard let model else { return }
+    /// `key` names the item the menu was opened on; it is resolved against the map shown now, and nothing happens if it is gone.
+    private func chooseContext(_ action: MapContextAction, key: String) {
+        guard let model, let rect = model.snapshot?.topLevelRect(forKey: key) else { return }
         model.select(rect)
         // Re-check at the time of the choice: the item may be in the basket or a move may have started since.
         guard contextItems(rect: rect).first(where: { $0.action == action })?.isEnabled == true else { return }
@@ -290,7 +291,7 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
             let entry = NSMenuItem(title: item.title, action: #selector(contextItemChosen(_:)), keyEquivalent: "")
             entry.target = self
             entry.isEnabled = item.isEnabled
-            entry.representedObject = ContextChoice(action: item.action, rect: top)
+            entry.representedObject = ContextChoice(action: item.action, key: snapshot.nodes[top].key)
             menu.addItem(entry)
         }
         return menu
@@ -298,13 +299,13 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func contextItemChosen(_ sender: NSMenuItem) {
         guard let choice = sender.representedObject as? ContextChoice else { return }
-        chooseContext(choice.action, rect: choice.rect)
+        chooseContext(choice.action, key: choice.key)
     }
 
     private final class ContextChoice: NSObject {
         let action: MapContextAction
-        let rect: Int
-        init(action: MapContextAction, rect: Int) { self.action = action; self.rect = rect }
+        let key: String
+        init(action: MapContextAction, key: String) { self.action = action; self.key = key }
     }
 
     private func dragChanged(_ drag: BasketDrag) {

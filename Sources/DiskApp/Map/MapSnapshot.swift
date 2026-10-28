@@ -116,8 +116,12 @@ extension MapSnapshot {
     /// What a drop of a press on `key` adds: that item as this level shows it now, or nil when it is no longer a
     /// top-level block here (the map was rebuilt, zoomed or the item went away during the drag).
     public func basketItem(droppedKey key: String) -> BasketItem? {
-        guard let rect = (0..<layout.topLevelCount).first(where: { nodes.indices.contains($0) && nodes[$0].key == key })
-        else { return nil }
-        return basketItem(at: rect)
+        topLevelRect(forKey: key).flatMap { basketItem(at: $0) }
+    }
+
+    /// The top-level rect showing `key` now, or nil when it is no longer a block at this level. A menu holds the
+    /// key, not an index, so a rebuild while it is open can't redirect its choice to another block.
+    public func topLevelRect(forKey key: String) -> Int? {
+        (0..<layout.topLevelCount).first(where: { nodes.indices.contains($0) && nodes[$0].key == key })
     }
 }

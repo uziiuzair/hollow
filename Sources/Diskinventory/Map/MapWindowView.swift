@@ -74,7 +74,7 @@ struct MapWindowActions {
     var protected: () -> [LensHit]
     /// The right-click menu for a top-level block or row, and what choosing an item does (it selects the item first).
     var contextItems: (Int) -> [MapContextItem]
-    var chooseContext: (MapContextAction, Int) -> Void
+    var chooseContext: (MapContextAction, String) -> Void
 }
 
 /// Colors from the approved flat mockup, on the native window background.
@@ -333,7 +333,7 @@ private struct SideList: View {
     let drag: (BasketDrag) -> Void
     let drop: (BasketDrag) -> Void
     let contextItems: (Int) -> [MapContextItem]
-    let chooseContext: (MapContextAction, Int) -> Void
+    let chooseContext: (MapContextAction, String) -> Void
     @State private var rowDrag: BasketDrag?
 
     var body: some View {
@@ -376,17 +376,19 @@ private struct SideList: View {
                                     guard let node = row.node, let snapshot = model.snapshot,
                                           snapshot.nodes.indices.contains(node) else { return }
                                     model.select(node)
-                                    if MapClick.opensFolder(clickCount: 2, isFolder: snapshot.nodes[node].isFolder, dragActive: false) {
+                                    if MapClick.opensFolder(clickCount: 2, isFolder: snapshot.nodes[node].isFolder) {
                                         model.zoomIn(node)
                                     }
                                 })
                                 .contextMenu {
-                                    if let node = row.node {
+                                    // The menu holds the item's key, not its index: a rebuild while it is open can't retarget it.
+                                    if let node = row.node, let snapshot = model.snapshot, snapshot.nodes.indices.contains(node) {
+                                        let key = snapshot.nodes[node].key
                                         ForEach(Array(contextItems(node).enumerated()), id: \.offset) { _, item in
                                             if item.action == .separator {
                                                 Divider()
                                             } else {
-                                                Button(item.title) { chooseContext(item.action, node) }.disabled(!item.isEnabled)
+                                                Button(item.title) { chooseContext(item.action, key) }.disabled(!item.isEnabled)
                                             }
                                         }
                                     }
