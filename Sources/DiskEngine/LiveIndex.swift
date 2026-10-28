@@ -128,8 +128,9 @@ public actor LiveIndex {
     }
 
     /// Relists every folder that was unreadable when it was last listed (Full Disk Access may have been granted
-    /// since), scans what turns up, and returns how many of them are readable now.
-    public func retryUnreadable() async throws -> Int {
+    /// since), scans what turns up, and returns how many of them are readable now. `beforeScan` (tests) runs just before
+    /// the scan of what turned up starts.
+    public func retryUnreadable(beforeScan: (@Sendable () -> Void)? = nil) async throws -> Int {
         await lock()
         defer { unlock() }
         guard !closed, let index else { return 0 }
@@ -145,7 +146,10 @@ public actor LiveIndex {
             if listing.outcome == .ok { readable += 1 }
             toScan += try index.relist(listing)
         }
-        if !toScan.isEmpty { try await scan(index, starting: toScan) }
+        if !toScan.isEmpty {
+            beforeScan?()
+            try await scan(index, starting: toScan)
+        }
         if readable > 0 {
             indexChanged()
             scheduleSave()

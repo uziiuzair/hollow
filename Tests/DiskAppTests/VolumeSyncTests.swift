@@ -16,3 +16,15 @@ import Testing
         ejecting: ["ejecting"], now: now, grace: 5)
     #expect(replace == ["refused"])
 }
+
+@Test func mapWindowReattachesOnlyAfterARefusedEject() {
+    // Refused: the spent controller was replaced while the drive stayed mounted.
+    #expect(VolumeSync.shouldReattach(windowDrive: "T7", holdsCurrentController: false, unmounting: false, refused: ["T7"]))
+    // A real unmount and a remount: the basket was dropped, so no reattach (the next open makes a fresh window).
+    #expect(!VolumeSync.shouldReattach(windowDrive: "T7", holdsCurrentController: false, unmounting: false, refused: []))
+    // Already on the current controller, or the new one is unmounting too.
+    #expect(!VolumeSync.shouldReattach(windowDrive: "T7", holdsCurrentController: true, unmounting: false, refused: ["T7"]))
+    #expect(!VolumeSync.shouldReattach(windowDrive: "T7", holdsCurrentController: false, unmounting: true, refused: ["T7"]))
+    // Another drive's refused eject.
+    #expect(!VolumeSync.shouldReattach(windowDrive: "T7", holdsCurrentController: false, unmounting: false, refused: ["X"]))
+}

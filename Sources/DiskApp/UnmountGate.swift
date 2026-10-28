@@ -27,10 +27,14 @@ public final class UnmountGate: @unchecked Sendable {
         self.close = close
     }
 
-    /// The drives with an open index. A trailing `/` is dropped.
+    /// The drives with an open index. A trailing `/` is dropped. A path no longer listed forgets its close, so a close
+    /// that never finishes cannot hold that drive's later unmounts.
     public func setOpen(_ volumePaths: Set<String>) {
         let paths = Set(volumePaths.map(Self.trimmed))
-        lock.withLock { open = paths }
+        lock.withLock {
+            open = paths
+            closing = closing.filter { paths.contains($0.key) }
+        }
     }
 
     /// Blocks the calling thread (never main) until the drive's index closes, or at most `limit`.
@@ -56,8 +60,10 @@ public final class UnmountGate: @unchecked Sendable {
 
     private func closed(_ path: String, _ group: DispatchGroup) {
         lock.withLock {
+            // A close the gate already forgot (setOpen dropped the path) changes nothing: the drive may be open again.
+            guard closing[path] === group else { return }
+            closing[path] = nil
             open.remove(path)
-            if closing[path] === group { closing[path] = nil }
         }
         group.leave()
     }

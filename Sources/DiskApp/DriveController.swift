@@ -65,6 +65,8 @@ public final class DriveController: ObservableObject {
     private static let log = Logger(subsystem: AppIdentity.bundleID, category: "index")
     /// Tests only: runs between a map build's index read and its unmount check.
     var afterMapRead: (() async -> Void)?
+    /// Tests only: runs off main just before the unreadable-folder retry starts its scan.
+    var beforeRetryScan: (@Sendable () -> Void)?
 
     /// Bytes the lens found that regenerate on their own (nil before the first report).
     public var clearable: UInt64? { lens?.total(.regenerates) }
@@ -176,7 +178,8 @@ public final class DriveController: ObservableObject {
                 let probe = fullDiskAccess
                 if await Task.detached(operation: { probe() }).value, !unmounting {
                     // Held so willUnmount() can cancel it (nothing suspends between the check and this assignment).
-                    let retry = Task { _ = try? await live.retryUnreadable() }
+                    let hook = beforeRetryScan
+                    let retry = Task { _ = try? await live.retryUnreadable(beforeScan: hook) }
                     retrying = retry
                     await retry.value
                     retrying = nil

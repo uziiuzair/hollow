@@ -17,4 +17,12 @@ public enum VolumeSync {
             mounted.contains(uuid) && !ejecting.contains(uuid) && now.timeIntervalSince(finished) >= grace ? uuid : nil
         })
     }
+
+    /// Whether the map window for `windowDrive` should rebind to the drive's current controller. Only after a refused
+    /// eject (`refused`): the drive never left, so the window's basket is still the drive's. After a real unmount the
+    /// basket was dropped, and the next open makes a fresh window instead.
+    public static func shouldReattach(windowDrive: String, holdsCurrentController: Bool, unmounting: Bool,
+                                      refused: Set<String>) -> Bool {
+        !holdsCurrentController && !unmounting && refused.contains(windowDrive)
+    }
 }

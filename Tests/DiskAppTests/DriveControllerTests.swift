@@ -397,23 +397,24 @@ private final class Flag: @unchecked Sendable {
     let first = DriveController(volume: try Fixtures.volume(root), store: store)
     await first.warm(); await first.cool()
     chmod(locked, 0o755)
+    // Past the chmod's FSEvents event, so only the retry (not a replayed event) relists the folder.
+    let snapshot = try ScanIndex.load(from: store)
+    snapshot.lastEventID += 1_000_000_000
+    try snapshot.save(to: store)
 
-    let probed = Flag()
-    let c = DriveController(volume: try Fixtures.volume(root), store: store, fullDiskAccess: { probed.set(); return true })
+    let started = Flag(), go = DispatchSemaphore(value: 0)
+    let c = DriveController(volume: try Fixtures.volume(root), store: store, fullDiskAccess: { true })
+    // Holds the retry at the start of its scan until willUnmount has begun (it cancels synchronously).
+    c.beforeRetryScan = { started.set(); _ = go.wait(timeout: .now() + 30) }
     let warming = Task { await c.warm() }
-    for _ in 0..<2_000 where !probed.isSet { try await Task.sleep(for: .milliseconds(5)) }
-    #expect(probed.isSet)
-    // Let the retry get into its scan.
-    try await Task.sleep(for: .milliseconds(50))
-    let clock = ContinuousClock()
-    let started = clock.now
-    await c.willUnmount()
-    let unmountTook = clock.now - started
+    for _ in 0..<6_000 where !started.isSet { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(started.isSet)
+    let unmounting = Task { await c.willUnmount() }
+    for _ in 0..<6_000 where c.activity != .offline { try await Task.sleep(for: .milliseconds(5)) }
+    go.signal()
+    await unmounting.value
     await warming.value
     #expect(c.activity == .offline)
     let saved = try ScanIndex.load(from: store)
     #expect(!saved.pending.isEmpty, "the retry ran to the end instead of stopping")
-
-    let fullScan = try await DiskScanner(root: root, storage: try Fixtures.tempDir()).run().elapsed
-    #expect(unmountTook < fullScan, "unmount took \(unmountTook), a full scan \(fullScan)")
 }

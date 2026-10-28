@@ -59,7 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Holds a Finder eject (at most 2 s) while the drive's index closes; fed by every external controller's activity.
     private var unmountGate: UnmountGate?
     private var unmountApprover: UnmountApprover?
-    private var activitySinks: [ObjectIdentifier: AnyCancellable] = [:]
+    /// By uuid, each with the controller it watches (held, so a replacement at a reused address still gets its own sink).
+    private var activitySinks: [String: (controller: DriveController, sink: AnyCancellable)] = [:]
+    /// Drives whose eject was refused and whose spent controller was replaced: the map window may reattach to them.
+    private var refusedEjects: Set<String> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -233,6 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // controller would show the mounted drive as "Not connected" for good.
         for uuid in VolumeSync.spentControllersToReplace(
             mounted: Set(volumes.map(\.uuid)), unmountFinished: unmountFinished, ejecting: ejecting, now: now) {
+            refusedEjects.insert(uuid)
             controllers[uuid] = nil
             unmounts[uuid] = nil
             unmountFinished[uuid] = nil
@@ -268,8 +272,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         watchActivity()
         rebuild()
         // A refused eject left the drive mounted with a new controller: the map window shows it again (Decision 24).
-        if let window = mapWindow, let c = controllers[window.uuid], unmounts[window.uuid] == nil,
-           window.driveController !== c {
+        if let window = mapWindow, let c = controllers[window.uuid],
+           VolumeSync.shouldReattach(windowDrive: window.uuid, holdsCurrentController: window.driveController === c,
+                                     unmounting: unmounts[window.uuid] != nil, refused: refusedEjects) {
+            refusedEjects.remove(window.uuid)
             Task { await window.reattach(controller: c) }
         }
     }
@@ -290,13 +296,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// One sink per external controller; the gate always knows which drives have an open index.
     private func watchActivity() {
         guard unmountGate != nil else { return }
-        var live: [ObjectIdentifier: DriveController] = [:]
-        for c in controllers.values where !c.volume.isInternalData { live[ObjectIdentifier(c)] = c }
-        activitySinks = activitySinks.filter { live[$0.key] != nil }
-        for (id, c) in live where activitySinks[id] == nil {
+        activitySinks = activitySinks.filter { uuid, entry in controllers[uuid] === entry.controller }
+        for (uuid, c) in controllers where !c.volume.isInternalData && activitySinks[uuid] == nil {
             // @Published fires on willSet; hop a turn so the read sees the new value.
-            activitySinks[id] = c.$activity.receive(on: DispatchQueue.main)
+            let sink = c.$activity.receive(on: DispatchQueue.main)
                 .sink { [weak self] _ in self?.updateOpenDrives() }
+            activitySinks[uuid] = (c, sink)
         }
         updateOpenDrives()
     }
@@ -383,6 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.unmountFinished[uuid] = nil
                 self.connectedSince[uuid] = nil
                 self.baskets.drop(uuid)
+                self.refusedEjects.remove(uuid)
             }
             self.syncVolumes()
         }
@@ -405,6 +411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Still mounted: this controller is spent, so start a fresh one.
                 guard let self else { return }
                 self.ejecting.remove(uuid)
+                self.refusedEjects.insert(uuid)
                 self.controllers[uuid] = nil
                 self.unmounts[uuid] = nil
                 self.unmountFinished[uuid] = nil

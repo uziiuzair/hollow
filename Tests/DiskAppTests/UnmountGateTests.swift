@@ -68,3 +68,21 @@ private func timed(_ body: @escaping @Sendable () -> UnmountHold) async -> (Unmo
     #expect(await timed { g.approve(volumePath: "/Volumes/T7") }.0 == .closed)
     #expect(closes.paths == ["/Volumes/T7"])
 }
+
+@Test func aCloseThatNeverFinishesIsForgottenWhenTheDriveLeavesTheOpenSet() async {
+    let closes = Closes()
+    let g = UnmountGate(limit: .milliseconds(200)) { path in
+        closes.add(path)
+        // The first close hangs; later ones finish at once.
+        if closes.paths.count == 1 { try? await Task.sleep(for: .seconds(30)) }
+    }
+    g.setOpen(["/Volumes/T7"])
+    #expect(await timed { g.approve(volumePath: "/Volumes/T7") }.0 == .timedOut)
+    // The drive went offline: its next unmount is not held by the hung close.
+    g.setOpen([])
+    #expect(await timed { g.approve(volumePath: "/Volumes/T7") }.0 == .notOpen)
+    // Open again (a new index): a new close runs and answers.
+    g.setOpen(["/Volumes/T7"])
+    #expect(await timed { g.approve(volumePath: "/Volumes/T7") }.0 == .closed)
+    #expect(closes.paths.count == 2)
+}
