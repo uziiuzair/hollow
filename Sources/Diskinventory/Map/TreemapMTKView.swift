@@ -45,9 +45,11 @@ final class TreemapMTKView: MTKView {
     }
 
     private func updateClearColor() {
-        var color = NSColor.windowBackgroundColor
+        // A fixed sRGB fallback: component accessors raise on a catalog color.
+        var color = isDark ? NSColor(srgbRed: 0.196, green: 0.196, blue: 0.196, alpha: 1)
+                           : NSColor(srgbRed: 0.925, green: 0.925, blue: 0.925, alpha: 1)
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            color = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? color
+            if let resolved = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) { color = resolved }
         }
         clearColor = MTLClearColor(red: Double(color.redComponent), green: Double(color.greenComponent),
                                    blue: Double(color.blueComponent), alpha: Double(color.alphaComponent))
@@ -58,6 +60,12 @@ final class TreemapMTKView: MTKView {
         updateClearColor()
         if let snapshot { renderer?.show(snapshot, dark: isDark, animation: nil, in: self) }
         needsDisplay = true
+    }
+
+    /// Labels are rasterized at the backing scale; re-show after moving between Retina and non-Retina screens.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if let snapshot { renderer?.show(snapshot, dark: isDark, animation: nil, in: self) }
     }
 
     override func setFrameSize(_ newSize: NSSize) {

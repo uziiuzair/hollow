@@ -29,11 +29,11 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
 
     /// GPU resources for one snapshot. Built off main, then only read on main.
     private struct Scene: @unchecked Sendable {
-        var blocks: MTLBuffer?
-        var blockCount: Int
-        var labels: MTLBuffer?
-        var labelCount: Int
-        var atlas: MTLTexture?
+        let blocks: MTLBuffer?
+        let blockCount: Int
+        let labels: MTLBuffer?
+        let labelCount: Int
+        let atlas: MTLTexture?
     }
 
     private struct ZoomStats {
@@ -83,15 +83,19 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
         let scale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let box = DeviceBox(device: device)
         pending = Task.detached(priority: .userInitiated) { [weak self] in
-            let scene = Self.makeScene(snapshot, dark: dark, scale: scale, device: box.device)
-            guard !Task.isCancelled else { return }
+            guard let scene = Self.makeScene(snapshot, dark: dark, scale: scale, device: box.device),
+                  !Task.isCancelled else { return }
             await self?.install(scene, generation: generation, animation: animation, in: view)
         }
     }
 
-    nonisolated private static func makeScene(_ snapshot: MapSnapshot, dark: Bool, scale: CGFloat, device: MTLDevice) -> Scene {
+    /// Nil when the task was cancelled (a newer `show` superseded it). Checks between the expensive
+    /// steps so a superseded build never rasterizes labels or allocates GPU memory it will throw away.
+    nonisolated private static func makeScene(_ snapshot: MapSnapshot, dark: Bool, scale: CGFloat, device: MTLDevice) -> Scene? {
         var instances = TreemapScene.instances(snapshot: snapshot, dark: dark)
+        guard !Task.isCancelled else { return nil }
         let atlas = LabelAtlas.build(snapshot: snapshot, scale: scale, dark: dark)
+        guard !Task.isCancelled else { return nil }
         var quads = atlas.quads
         let blocks = instances.isEmpty ? nil : device.makeBuffer(
             bytes: &instances, length: instances.count * MemoryLayout<BlockInstance>.stride, options: .storageModeShared)
