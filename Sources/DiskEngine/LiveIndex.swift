@@ -911,6 +911,8 @@ public actor LiveIndex {
         return ChangeReport.changes(from: then, to: try SizeSnapshot.capture(index))
     }
 
+    /// Runs `body` on the index without taking the lock, so it can see an apply or a save half done. Tests only: everything
+    /// else reads through `read`.
     public func withIndex<R: Sendable>(_ body: (ScanIndex) throws -> R) rethrows -> R {
         guard let index else { preconditionFailure("LiveIndex used before open()") }
         return try body(index)
