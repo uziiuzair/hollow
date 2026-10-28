@@ -452,6 +452,33 @@ private final class Flag: @unchecked Sendable {
     #expect(!saved.pending.isEmpty, "the retry ran to the end instead of stopping")
 }
 
+// Final re-review N1: a walk that read the index before a move doesn't publish over the move's in-memory removal.
+@MainActor @Test func aWalkInFlightDuringATrashDoesNotBringTheMovedItemsBack() async throws {
+    let root = try Fixtures.tree(["Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000,
+                                  "Users/u/Documents/d.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    // The warm's walk, held after it has read the index (DerivedData still there) and before it publishes.
+    let (held, release) = AsyncStream.makeStream(of: Void.self)
+    let (reached, signal) = AsyncStream.makeStream(of: Void.self)
+    c.beforeLensPublish = {
+        signal.yield()
+        for await _ in held { break }
+    }
+    await c.warm()
+    for await _ in reached { break }
+    let item = BasketItem(path: "Users/u/Library/Developer/Xcode/DerivedData", name: "DerivedData", size: 3_000_000,
+                          kind: nil, isFolder: true, ruleID: "xcode-derived-data", safety: .regenerates)
+    let out = await c.trash([item], backend: FixtureTrash(bin: try Fixtures.tempDir()))
+    #expect(out.moved == ["Users/u/Library/Developer/Xcode/DerivedData"])
+    release.yield()
+    await c.lensSettled()
+    let lens = try #require(c.lens)
+    #expect(!lens.hits.contains { $0.path == "Users/u/Library/Developer/Xcode/DerivedData" })
+    #expect(c.clearable == 0)
+    c.beforeLensPublish = nil
+    await c.cool()
+}
+
 // Final review I3: a move to the Trash walks the lens neither before nor after. The report loses the moved items and their
 // bytes in memory; the next warm walks again because the index has changed since.
 @MainActor @Test func trashUpdatesTheLensInMemoryWithoutAWalk() async throws {

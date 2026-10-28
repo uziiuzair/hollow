@@ -64,6 +64,9 @@ public final class DriveController: ObservableObject {
     /// Orders lens walks: only a walk started after the one that set `lens` may replace it.
     private var lensRequests = 0
     private var lensApplied = 0
+    /// What each move to the Trash removed from the lens, in order: a walk that started before a move applies the
+    /// removals made since its start before it publishes, so the moved items don't come back. Cleared on a cool.
+    private var lensRemovals: [[String: UInt64]] = []
     /// Tests only: how many lens walks have started.
     private(set) var lensWalks = 0
     /// Set when an unmount begins; read off main by a trash in progress, so it stops between items.
@@ -74,6 +77,8 @@ public final class DriveController: ObservableObject {
     private static let log = Logger(subsystem: AppIdentity.bundleID, category: "index")
     /// Tests only: runs between a map build's index read and its unmount check.
     var afterMapRead: (() async -> Void)?
+    /// Tests only: runs between a lens walk's last chunk and its publish.
+    var beforeLensPublish: (() async -> Void)?
     /// Tests only: runs off main just before the unreadable-folder retry starts its scan.
     var beforeRetryScan: (@Sendable () -> Void)?
 
@@ -264,6 +269,7 @@ public final class DriveController: ObservableObject {
         lensWalks += 1
         lensRequests += 1
         let request = lensRequests
+        let removalMark = lensRemovals.count
         let start = ContinuousClock.now
         // One uncapped walk: the shown report is its large hits, the protected set all its app-managed ones. In chunks,
         // each under the index lock and none holding it long, so applies, map builds, a trash and a close go between.
@@ -282,7 +288,11 @@ public final class DriveController: ObservableObject {
             walk = next
             chunks += 1
         }
-        let all = walk.report()
+        await beforeLensPublish?()
+        var all = walk.report()
+        // A cool cleared the removals (and cancelled this walk): nothing to publish.
+        guard !Task.isCancelled, removalMark <= lensRemovals.count else { return }
+        for bytes in lensRemovals[removalMark...] { all = all.removing(bytes) }
         let report = LensReport(hits: Array(all.hits.lazy.filter { $0.size >= Self.lensMinBytes }.prefix(Self.lensLimit)),
                                 generation: gen)
         let ms = (ContinuousClock.now - start) / .milliseconds(1)
@@ -345,6 +355,7 @@ public final class DriveController: ObservableObject {
         var bytes: [String: UInt64] = [:]
         for item in items where cleared.contains(item.path) { bytes[item.path] = item.size }
         for path in cleared where bytes[path] == nil { bytes[path] = 0 }
+        lensRemovals.append(bytes)
         lens = lens?.removing(bytes)
         protectedHits = LensReport.removing(bytes, from: protectedHits)
     }
@@ -360,6 +371,7 @@ public final class DriveController: ObservableObject {
     private func coolBody() async {
         // A walk in progress stops at its next chunk; the last report stays.
         lensTask?.cancel(); lensTask = nil
+        lensRemovals = []
         timer?.cancel(); timer = nil
         timerID += 1
         watching?.cancel(); watching = nil
