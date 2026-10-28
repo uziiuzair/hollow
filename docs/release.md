@@ -29,10 +29,28 @@ What each step checks:
 2. `scripts/make-app.sh release` builds the app.
 3. `codesign` signs with the Developer ID, a secure timestamp and the hardened runtime, then verifies the signature strictly.
 4. `ditto` zips the app to `.build/Diskinventory-$VERSION.zip`.
-5. `notarytool submit --wait` uploads the zip. Any status but Accepted fails the release.
+5. `notarytool submit --wait --timeout 30m --output-format json` uploads the zip and waits up to 30 minutes. The script reads `status` from the JSON with `plutil -extract status raw`; any status but Accepted fails the release and prints the submission ID.
 6. `stapler staple` attaches the ticket, and `stapler validate` checks it.
 7. `spctl --assess` confirms Gatekeeper accepts the app.
 8. The stapled app is zipped again to the same path. That zip is the release.
+
+### When notarization is rejected
+
+The script prints the submission ID. Ask Apple why:
+
+```
+xcrun notarytool log <submission-id> --keychain-profile diskinventory-notary
+```
+
+The log lists each problem with the file it is in (a missing timestamp, an unsigned nested binary, a disallowed entitlement). If the ID scrolled away, or the 30-minute wait timed out, list your recent submissions and their status:
+
+```
+xcrun notarytool history --keychain-profile diskinventory-notary
+```
+
+A submission that timed out keeps going on Apple's side; check it later with `xcrun notarytool info <submission-id> --keychain-profile diskinventory-notary`, then staple by hand once it is Accepted.
+
+The script passes `--team-id` together with `--keychain-profile`. The profile already carries the team, so if notarytool ever rejects the pair, drop `--team-id "$TEAM_ID"` from the submit line in `scripts/release.sh`.
 
 ### Verify a download
 

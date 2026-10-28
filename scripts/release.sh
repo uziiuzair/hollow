@@ -47,17 +47,22 @@ run codesign --verify --strict --verbose=2 "$APP"
 
 run ditto -c -k --keepParent "$APP" "$ZIP"
 
+# The profile already names the team; --team-id is kept for clarity (see docs/release.md if notarytool rejects the pair).
 if [ -n "$DRY_RUN" ]; then
-    echo "+ xcrun notarytool submit $ZIP --keychain-profile $NOTARY_PROFILE --team-id $TEAM_ID --wait"
+    echo "+ xcrun notarytool submit $ZIP --keychain-profile $NOTARY_PROFILE --team-id $TEAM_ID --wait --timeout 30m --output-format json"
 else
     log="$(mktemp)"
-    xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --team-id "$TEAM_ID" --wait | tee "$log"
-    if ! grep -q 'status: Accepted' "$log"; then
-        rm -f "$log"
-        echo "release.sh: notarization was not Accepted" >&2
+    trap 'rm -f "$log"' EXIT
+    xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --team-id "$TEAM_ID" \
+        --wait --timeout 30m --output-format json > "$log"
+    cat "$log"
+    status="$(plutil -extract status raw -o - "$log" 2>/dev/null || true)"
+    if [ "$status" != "Accepted" ]; then
+        id="$(plutil -extract id raw -o - "$log" 2>/dev/null || true)"
+        echo "release.sh: notarization was not Accepted (status: ${status:-unknown})" >&2
+        [ -z "$id" ] || echo "See why: xcrun notarytool log $id --keychain-profile $NOTARY_PROFILE" >&2
         exit 1
     fi
-    rm -f "$log"
 fi
 
 run xcrun stapler staple "$APP"
