@@ -17,3 +17,15 @@ import Foundation
     _ = try DriveRegistry(file: file).upsert(.init(url: URL(filePath: "/"), uuid: "I", name: "Macintosh HD", isInternalData: true, device: 1), space: nil, now: .now)
     #expect(DriveRegistry(file: file).all().first?.tintIndex == 0)
 }
+
+@Test func corruptRegistryIsMovedAside() throws {
+    let dir = try Fixtures.tempDir()
+    let file = dir.appending(path: "drives.json")
+    let garbage = Data("not json {{{".utf8)
+    try garbage.write(to: file)
+    let reg = DriveRegistry(file: file)
+    _ = try reg.upsert(.init(url: URL(filePath: "/Volumes/X"), uuid: "X", name: "X", isInternalData: false, device: 5), space: nil, now: .now)
+    let aside = dir.appending(path: "drives.json.corrupt")
+    #expect(try Data(contentsOf: aside) == garbage)
+    #expect(reg.all().count == 1)
+}

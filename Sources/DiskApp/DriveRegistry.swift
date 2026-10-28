@@ -28,12 +28,22 @@ public final class DriveRegistry: @unchecked Sendable {
 
     public init(file: URL) {
         self.file = file
+        drives = Self.load(file)
+    }
+
+    /// Absent file: start empty. Present but unreadable or undecodable: move it
+    /// aside to `<name>.corrupt` (replacing any older one) and start empty.
+    private static func load(_ file: URL) -> [KnownDrive] {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: file.path(percentEncoded: false)) else { return [] }
         if let data = try? Data(contentsOf: file),
-           let decoded = try? Self.decoder.decode([KnownDrive].self, from: data) {
-            drives = decoded
-        } else {
-            drives = []
+           let decoded = try? decoder.decode([KnownDrive].self, from: data) {
+            return decoded
         }
+        let aside = file.appendingPathExtension("corrupt")
+        try? fm.removeItem(at: aside)
+        try? fm.moveItem(at: file, to: aside)
+        return []
     }
 
     public func upsert(_ v: VolumeInfo, space: VolumeSpace?, now: Date) throws -> KnownDrive {
