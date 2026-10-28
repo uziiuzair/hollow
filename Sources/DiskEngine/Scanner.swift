@@ -77,6 +77,8 @@ public final class DiskScanner: Sendable {
     /// queued and in-flight folders and `checkpoint` runs; returning `.stop` ends the
     /// scan with those folders still pending. Cancelling the task does the same. On
     /// completion `pending` is empty. Returns the number of unreadable folders. Finishes `progress` when done.
+    /// The loop that writes `index`, and `checkpoint`, run on `isolation` (the caller's actor), so an actor that owns the
+    /// index never races it.
     public func scan(
         into index: ScanIndex,
         starting: [FolderID],
@@ -102,6 +104,10 @@ public final class DiskScanner: Sendable {
         let qos = self.qos
 
         await withTaskGroup(of: DirectoryListing.self) { group in
+            // A closure is isolated to an `isolated` parameter only when it captures it (SE-0420). Without this capture
+            // the loop below, the index's one writer, ran on the global executor while its caller's actor (a
+            // `LiveIndex`) ran too, and the two raced on the index.
+            isolation?.assertIsolated("the scan loop must run on its caller's actor")
             func launch() {
                 while inFlight.count < workers, head < queue.count, !Task.isCancelled {
                     let folder = queue[head]
