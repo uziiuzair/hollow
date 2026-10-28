@@ -25,8 +25,10 @@ public final class DriveController: ObservableObject {
     private let store: URL
     private let coolDown: Duration
     private var index: LiveIndex?
-    private var opening: Task<Bool, Never>?
+    private var opening: Task<LiveIndex?, Never>?
     private var timer: Task<Void, Never>?
+    /// Bumped by every close so an in-flight `warm()` knows it was superseded.
+    private var epoch = 0
 
     public var hasJournal: Bool { EventWatcher.journalUUID(device: volume.device) != nil }
 
@@ -43,6 +45,7 @@ public final class DriveController: ObservableObject {
 
     public func warm() async {
         guard activity != .offline else { return }
+        let start = epoch
         if index == nil {
             if let opening {
                 _ = await opening.value
@@ -50,26 +53,31 @@ public final class DriveController: ObservableObject {
                 await open()
             }
         }
-        guard index != nil else { return }
+        guard epoch == start, index != nil else { return }
         await refresh()
+        guard epoch == start, index != nil else { return }
         activity = .ready
         restartTimer()
     }
 
+    /// The open task owns the instance. If `cool()`/`willUnmount()` ran meanwhile
+    /// (epoch changed), they take the instance from the task and close it; this
+    /// method then leaves everything alone.
     private func open() async {
         let live = LiveIndex(volumeRoot: volume.url, store: store)
-        // A missing snapshot means open() will do a full scan.
-        activity = snapshotExists ? .opening : .scanning
-        let task = Task { () -> Bool in
-            do { _ = try await live.open(); return true } catch { return false }
+        let start = epoch
+        // Without a snapshot or a journal, open() will do a full scan.
+        activity = (snapshotExists && hasJournal) ? .opening : .scanning
+        let task = Task { () -> LiveIndex? in
+            do { _ = try await live.open(); return live } catch { try? await live.close(); return nil }
         }
         opening = task
-        let ok = await task.value
+        let opened = await task.value
+        guard epoch == start else { return }
         opening = nil
-        if ok {
-            index = live
+        if let opened {
+            index = opened
         } else {
-            try? await live.close()
             activity = .idle
         }
     }
@@ -89,12 +97,16 @@ public final class DriveController: ObservableObject {
         if activity != .offline { activity = .idle }
     }
 
-    /// Closes the index (which records today's history) and drops it.
+    /// Closes the index (which records today's history), including one still opening.
     private func closeIndex() async {
-        if let opening { _ = await opening.value }
-        guard let live = index else { return }
+        epoch += 1
+        var live = index
         index = nil
-        try? await live.close()
+        if let task = opening {
+            opening = nil
+            live = await task.value ?? live
+        }
+        try? await live?.close()
     }
 
     public func recordDailyHistoryIfNeeded() async {

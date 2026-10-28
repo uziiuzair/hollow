@@ -3,6 +3,10 @@ import Testing
 @testable import DiskApp
 @testable import DiskEngine
 
+private func todayRecorded(_ store: URL) throws -> Bool {
+    try HistoryStore(directory: store.appending(path: "history")).days().contains(Day(.now, calendar: .current))
+}
+
 @MainActor @Test func warmThenCoolReleasesIndex() async throws {
     let root = try Fixtures.tree(["Users/u/Movies/m.mov": 2_000_000])
     let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir(), coolDown: .milliseconds(200))
@@ -28,7 +32,7 @@ import Testing
     await c.warm()
     await c.willUnmount()
     #expect(c.activity == .offline)
-    #expect(FileManager.default.fileExists(atPath: store.appending(path: "index.snapshot").path))
+    #expect(try todayRecorded(store))
 }
 
 @MainActor @Test func exFATScansOnlyWhenSelected() async throws {
@@ -37,4 +41,28 @@ import Testing
     c.refreshSpace()
     #expect(c.space != nil)
     #expect(!FileManager.default.fileExists(atPath: store.appending(path: "index.snapshot").path))
+}
+
+@MainActor @Test func willUnmountDuringWarmLeavesOffline() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000]); let store = try Fixtures.tempDir()
+    let c = DriveController(volume: try Fixtures.volume(root), store: store)
+    let warming = Task { await c.warm() }
+    await Task.yield()  // let warm() start and suspend inside open()
+    await c.willUnmount()
+    await warming.value
+    #expect(c.activity == .offline)
+    await c.cool()
+    #expect(c.activity == .offline)
+    #expect(try todayRecorded(store))
+}
+
+@MainActor @Test func coolDuringWarmEndsIdle() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000]); let store = try Fixtures.tempDir()
+    let c = DriveController(volume: try Fixtures.volume(root), store: store)
+    let warming = Task { await c.warm() }
+    await Task.yield()  // let warm() start and suspend inside open()
+    await c.cool()
+    await warming.value
+    #expect(c.activity == .idle)
+    #expect(try todayRecorded(store))
 }
