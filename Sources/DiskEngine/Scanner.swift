@@ -7,6 +7,10 @@ public struct ScanProgress: Sendable {
     public var bytesSeen: UInt64
 }
 
+public enum CheckpointDecision: Sendable {
+    case proceed, stop
+}
+
 public struct ScanResult {
     public var index: ScanIndex
     public var elapsed: Duration
@@ -30,52 +34,81 @@ public final class DiskScanner: Sendable {
     }
 
     public func run() async throws -> ScanResult {
-        defer { progressSink.finish() }
         let clock = ContinuousClock()
         let started = clock.now
 
         // Resolve a symlinked root (/tmp, /var, user aliases) so the walk starts at a real folder.
         let given = root.path(percentEncoded: false)
-        guard let resolved = realpath(given, nil) else { throw DiskEngineError.posix("realpath \(given)", errno) }
+        guard let resolved = realpath(given, nil) else {
+            progressSink.finish()
+            throw DiskEngineError.posix("realpath \(given)", errno)
+        }
         let rootPath = String(cString: resolved).trimmingSuffix("/")
         free(resolved)
         var info = stat()
-        guard lstat(rootPath, &info) == 0 else { throw DiskEngineError.posix("lstat \(rootPath)", errno) }
-        guard info.st_mode & S_IFMT == S_IFDIR else { throw DiskEngineError.notADirectory(rootPath) }
-        let rootDevice = info.st_dev
+        guard lstat(rootPath, &info) == 0 else {
+            progressSink.finish()
+            throw DiskEngineError.posix("lstat \(rootPath)", errno)
+        }
+        guard info.st_mode & S_IFMT == S_IFDIR else {
+            progressSink.finish()
+            throw DiskEngineError.notADirectory(rootPath)
+        }
 
         let index = try ScanIndex(rootName: root.lastPathComponent, storage: storage)
         index.rootPath = rootPath
-        index.rootDevice = rootDevice
-        var pending: [FolderID] = [0]
+        index.rootDevice = info.st_dev
+        let unreadable = try await scan(into: index, starting: [0])
+        return ScanResult(index: index, elapsed: clock.now - started, unreadableFolders: unreadable)
+    }
+
+    /// Lists `starting` and everything below them into `index`, using `index.rootPath`
+    /// and `index.rootDevice`. Every `checkpointEvery`, `index.pending` is set to all
+    /// queued and in-flight folders and `checkpoint` runs; returning `.stop` ends the
+    /// scan with those folders still pending. On completion `pending` is empty.
+    /// Returns the number of unreadable folders. Finishes `progress` when done.
+    public func scan(
+        into index: ScanIndex,
+        starting: [FolderID],
+        checkpointEvery: Duration = .seconds(30),
+        checkpoint: (ScanIndex) throws -> CheckpointDecision = { _ in .proceed },
+        isolation: isolated (any Actor)? = #isolation
+    ) async throws -> Int {
+        defer { progressSink.finish() }
+        let clock = ContinuousClock()
+        let rootPath = index.rootPath
+        let rootDevice = index.rootDevice
+        var queue = starting
         var head = 0
+        var inFlight: Set<FolderID> = []
         var stats = ScanProgress(foldersDone: 0, filesSeen: 0, bytesSeen: 0)
         var unreadable = 0
-        var lastReport = started
+        var lastReport = clock.now
+        var lastCheckpoint = clock.now
         var failure: (any Error)?
+        var stopped = false
 
         await withTaskGroup(of: DirectoryListing.self) { group in
-            var inFlight = 0
             func launch() {
-                while inFlight < workers, head < pending.count, !Task.isCancelled {
-                    let folder = pending[head]
+                while inFlight.count < workers, head < queue.count, !Task.isCancelled {
+                    let folder = queue[head]
                     head += 1
                     let path = index.path(of: folder, rootPath: rootPath)
                     group.addTask(priority: .utility) {
                         var reader = BulkDirectoryReader()
                         return reader.list(path: path, folder: folder)
                     }
-                    inFlight += 1
+                    inFlight.insert(folder)
                 }
-                if head > 4096, head * 2 > pending.count {
-                    pending.removeFirst(head)
+                if head > 4096, head * 2 > queue.count {
+                    queue.removeFirst(head)
                     head = 0
                 }
             }
 
             launch()
             while let listing = await group.next() {
-                inFlight -= 1
+                inFlight.remove(listing.folder)
                 if listing.outcome == .unreadable { unreadable += 1 }
                 stats.foldersDone += 1
                 for entry in listing.entries where entry.kind != .directory {
@@ -83,9 +116,18 @@ public final class DiskScanner: Sendable {
                     stats.bytesSeen += entry.allocated
                 }
                 do {
-                    pending += try index.integrate(listing, rootDevice: rootDevice)
+                    queue += try index.integrate(listing, rootDevice: rootDevice)
+                    if clock.now - lastCheckpoint >= checkpointEvery {
+                        lastCheckpoint = clock.now
+                        index.pending = Array(inFlight) + queue[head...]
+                        if try checkpoint(index) == .stop {
+                            stopped = true
+                            group.cancelAll()
+                            break
+                        }
+                    }
                 } catch {
-                    // Writing the file table failed (disk full, storage removed).
+                    // Writing the file table or a checkpoint failed (disk full, storage removed).
                     failure = error
                     group.cancelAll()
                     break
@@ -96,11 +138,17 @@ public final class DiskScanner: Sendable {
                 }
                 launch()
             }
+            // Listings still arriving after a stop are dropped; those folders stay pending.
+            while await group.next() != nil {}
         }
 
-        if let failure { throw failure }
+        if let failure {
+            index.pending = Array(inFlight) + queue[head...]
+            throw failure
+        }
+        if !stopped { index.pending = [] }
         progressSink.yield(stats)
-        return ScanResult(index: index, elapsed: clock.now - started, unreadableFolders: unreadable)
+        return unreadable
     }
 }
 
