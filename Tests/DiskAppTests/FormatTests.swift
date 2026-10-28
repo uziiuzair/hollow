@@ -24,3 +24,5 @@ import Testing
     #expect(Format.ago(older, now: now) == "Oct 20")
     #expect(Format.shortDate(older) == "Oct 20")
 }
+
+@Test func periodWords() { #expect([1, 7, 30].map(Format.periodWords) == ["today", "this week", "this month"]) }

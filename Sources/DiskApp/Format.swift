@@ -13,6 +13,14 @@ public enum Format {
         (delta < 0 ? minus : "+") + gb(delta.magnitude)
     }
 
+    public static func periodWords(_ days: Int) -> String {
+        switch days {
+        case 1: return "today"
+        case 7: return "this week"
+        default: return "this month"
+        }
+    }
+
     public static func ago(_ date: Date, now: Date) -> String {
         let seconds = now.timeIntervalSince(date)
         if seconds < 60 { return "just now" }
