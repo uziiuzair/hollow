@@ -102,3 +102,14 @@ private func todayRecorded(_ store: URL) throws -> Bool {
     let after = try FileManager.default.attributesOfItem(atPath: snapshot.path)[.modificationDate] as? Date
     #expect(before == after)
 }
+
+@MainActor @Test func failedOpenDuringUnmountStaysOffline() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000]); let store = try Fixtures.tempDir()
+    let c = DriveController(volume: try Fixtures.volume(root), store: store)
+    try FileManager.default.removeItem(at: root)  // open() will throw (realpath fails)
+    let warming = Task { await c.warm() }
+    await waitUntilBusy(c)
+    await c.willUnmount()
+    await warming.value
+    #expect(c.activity == .offline)
+}

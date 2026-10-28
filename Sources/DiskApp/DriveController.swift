@@ -96,7 +96,7 @@ public final class DriveController: ObservableObject {
                 index = live
             } catch {
                 try? await live.close()
-                activity = .idle
+                if !unmounting { activity = .idle }
                 return
             }
         }
