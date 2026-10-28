@@ -32,6 +32,13 @@ final class TreemapMTKView: MTKView {
 
     override var isFlipped: Bool { true }
 
+    /// Takes key focus (from the search field too) so the window's keys reach the map.
+    override var acceptsFirstResponder: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+    }
+
     var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
 
     /// Shows `snapshot`, zooming into it when `animation` is given.

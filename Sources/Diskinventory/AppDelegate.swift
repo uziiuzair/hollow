@@ -3,6 +3,7 @@ import Combine
 import DiskApp
 import DiskEngine
 import ServiceManagement
+import os
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -37,6 +38,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: DropdownPanel?
     private var lastDismiss = Date.distantPast
     private var clickMonitor: Any?
+    private var mapWindow: MapWindowController?
+    #if DEBUG
+    private var debugSnapshotDir: URL?
+    #endif
+    private let mapLog = Logger(subsystem: AppIdentity.bundleID, category: "map")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let quit = NSMenuItem(title: "Quit \(AppIdentity.name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -86,6 +92,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         if CommandLine.arguments.contains("--show-panel") {
             DispatchQueue.main.async { [weak self] in self?.showPanel(keepOpen: true) }
+        }
+        if CommandLine.arguments.contains("--show-map"), let id = internalUUID {
+            DispatchQueue.main.async { [weak self] in self?.openMap(uuid: id, focus: nil) }
+        }
+        // --map-snapshot <dir>: with --show-map, writes the window's PNGs once the map is drawn.
+        if let i = CommandLine.arguments.firstIndex(of: "--map-snapshot"), i + 1 < CommandLine.arguments.count {
+            debugSnapshotDir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
         }
         #endif
     }
@@ -376,6 +389,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func clearPanelTimers() {
         clockTimer?.invalidate(); clockTimer = nil
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
+    }
+
+    // MARK: Map window
+
+    /// Opens the map for drive `uuid`: at the root when `focus` is nil or empty, else at
+    /// `focus`'s parent with `focus` selected. One map window at a time.
+    func openMap(uuid: String, focus: String?) {
+        let clock = ContinuousClock()
+        let started = clock.now
+        guard let controller = controllers[uuid], unmounts[uuid] == nil,
+              let drive = registry?.all().first(where: { $0.uuid == uuid }) else { return }
+        var path = "", select: String?
+        if let focus, !focus.isEmpty {
+            path = focus.lastIndex(of: "/").map { String(focus[..<$0]) } ?? ""
+            select = focus
+        }
+        if let window = mapWindow, window.uuid == uuid {
+            window.show(path: path, select: select)
+        } else {
+            if let old = mapWindow {
+                mapWindow = nil
+                old.close()
+            }
+            let window = MapWindowController(controller: controller, drive: drive, path: path, select: select)
+            window.onClose = { [weak self, weak window] in
+                guard let self, self.mapWindow === window else { return }
+                self.mapWindow = nil
+                // The Dock icon shows only while the window is open (spec 5).
+                NSApp.setActivationPolicy(.accessory)
+            }
+            window.onFirstFrame = { [weak self] in
+                let ms = (clock.now - started) / .milliseconds(1)
+                self?.mapLog.info("first map frame in \(Int(ms)) ms")
+                #if DEBUG
+                if let dir = self?.debugSnapshotDir, let window = self?.mapWindow {
+                    Task { await window.debugCapture(to: dir) }
+                }
+                #endif
+            }
+            mapWindow = window
+        }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+        mapWindow?.showWindow(nil)
+        mapWindow?.window?.makeKeyAndOrderFront(nil)
+        let ms = (clock.now - started) / .milliseconds(1)
+        mapLog.info("map window shown in \(Int(ms)) ms")
+        #if DEBUG
+        if let w = mapWindow?.window { NSLog("Diskinventory map window \(w.windowNumber) frame \(w.frame)") }
+        #endif
     }
 
     // MARK: Quit

@@ -184,6 +184,59 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
         view.needsDisplay = true
     }
 
+    private func encode(_ encoder: MTLRenderCommandEncoder, size: CGSize, pixelsPerPoint: Float) {
+        uniforms.viewport = SIMD2(Float(size.width), Float(size.height))
+        uniforms.pixelsPerPoint = pixelsPerPoint
+        var u = uniforms
+        guard let scene else { return }
+        if let blocks = scene.blocks, scene.blockCount > 0 {
+            encoder.setRenderPipelineState(blockPipeline)
+            encoder.setVertexBuffer(blocks, offset: 0, index: 0)
+            encoder.setVertexBytes(&u, length: MemoryLayout<TreemapUniforms>.stride, index: 1)
+            encoder.setFragmentBytes(&u, length: MemoryLayout<TreemapUniforms>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: scene.blockCount)
+        }
+        if u.labelAlpha > 0, let labels = scene.labels, let atlas = scene.atlas, scene.labelCount > 0 {
+            encoder.setRenderPipelineState(labelPipeline)
+            encoder.setVertexBuffer(labels, offset: 0, index: 0)
+            encoder.setVertexBytes(&u, length: MemoryLayout<TreemapUniforms>.stride, index: 1)
+            encoder.setFragmentBytes(&u, length: MemoryLayout<TreemapUniforms>.stride, index: 0)
+            encoder.setFragmentTexture(atlas, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: scene.labelCount)
+        }
+    }
+
+    #if DEBUG
+    /// Draws the current scene into an offscreen image, for screenshots when the screen
+    /// can't be captured (locked, asleep).
+    func debugImage(in view: MTKView) -> CGImage? {
+        let size = view.bounds.size
+        let width = Int(view.drawableSize.width), height = Int(view.drawableSize.height)
+        guard size.width > 0, width > 0, height > 0 else { return nil }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        d.usage = [.renderTarget, .shaderRead]
+        d.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: d), let commands = queue.makeCommandBuffer() else { return nil }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = view.clearColor
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return nil }
+        encode(encoder, size: size, pixelsPerPoint: Float(CGFloat(width) / size.width))
+        encoder.endEncoding()
+        commands.commit()
+        commands.waitUntilCompleted()
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        texture.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+    #endif
+
     func draw(in view: MTKView) {
         var finalZoomFrame = false
         let zooming = zoom != nil
@@ -202,27 +255,7 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
               let commands = queue.makeCommandBuffer(),
               let encoder = commands.makeRenderCommandEncoder(descriptor: pass)
         else { return }
-        uniforms.viewport = SIMD2(Float(bounds.width), Float(bounds.height))
-        uniforms.pixelsPerPoint = Float(view.drawableSize.width / bounds.width)
-        var u = uniforms
-
-        if let scene {
-            if let blocks = scene.blocks, scene.blockCount > 0 {
-                encoder.setRenderPipelineState(blockPipeline)
-                encoder.setVertexBuffer(blocks, offset: 0, index: 0)
-                encoder.setVertexBytes(&u, length: MemoryLayout<TreemapUniforms>.stride, index: 1)
-                encoder.setFragmentBytes(&u, length: MemoryLayout<TreemapUniforms>.stride, index: 0)
-                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: scene.blockCount)
-            }
-            if u.labelAlpha > 0, let labels = scene.labels, let atlas = scene.atlas, scene.labelCount > 0 {
-                encoder.setRenderPipelineState(labelPipeline)
-                encoder.setVertexBuffer(labels, offset: 0, index: 0)
-                encoder.setVertexBytes(&u, length: MemoryLayout<TreemapUniforms>.stride, index: 1)
-                encoder.setFragmentBytes(&u, length: MemoryLayout<TreemapUniforms>.stride, index: 0)
-                encoder.setFragmentTexture(atlas, index: 0)
-                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: scene.labelCount)
-            }
-        }
+        encode(encoder, size: bounds, pixelsPerPoint: Float(view.drawableSize.width / bounds.width))
         encoder.endEncoding()
 
         if zooming {
