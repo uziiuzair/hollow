@@ -117,7 +117,9 @@ public actor LiveIndex {
     private var lastRelist: [String: ContinuousClock.Instant] = [:]
     private var flushTask: Task<Void, Never>?
     private var now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
-    private var mountPointLookup: @Sendable (String) -> String? = { EventPathMapper.mountPoint(of: $0) }
+    /// Tests only: false leaves FSEvents unwatched, so only the changes a test feeds in reach the index.
+    private var watchEvents = true
+    private var mountPointLookup: @Sendable (String) throws -> String = { try EventPathMapper.requireMountPoint(of: $0) }
     /// Relative paths the index leaves out; what the index currently reflects.
     private var exclusions: Set<String>
     /// What `exclusions.json` last held, so a save rewrites it only when it differs.
@@ -248,9 +250,8 @@ public actor LiveIndex {
         let journal = EventWatcher.journalUUID(device: device)
         // The device's real mount point ("/System/Volumes/Data" for the internal disk, where the
         // volume URL says "/"): FSEvents device streams report paths relative to it.
-        // No fallback: a wrong mount point would silently drop every event for the volume.
-        guard let mount = mountPointLookup(rootPath) else { throw DiskEngineError.posix("statfs \(rootPath)", errno) }
-        mountPoint = mount
+        // No fallback: a wrong mount point would silently drop every event for the volume. Throws statfs's own errno.
+        mountPoint = try mountPointLookup(rootPath)
 
         cachedKinds = nil
         var reason: String?
@@ -321,6 +322,8 @@ public actor LiveIndex {
             let start = ContinuousClock.now
             let outcome = try await applyLocked(changes, to: index)
             busyTime += ContinuousClock.now - start
+            // A scan cut short (cancelled, or the volume going) leaves folders pending: not applied, whatever it says.
+            guard index.pending.isEmpty else { throw CancellationError() }
             switch outcome {
             case .untouched: break
             case .full: indexChanged(folders: nil)
@@ -329,9 +332,10 @@ public actor LiveIndex {
         } catch {
             indexChanged(folders: nil)
             // Part of the change may be in the index; drop the snapshot so a crash means a
-            // full rescan, and rescan on the next apply. The event ID stays put.
+            // full rescan, and rescan on the next apply. The event ID stays put. A vanished root saves
+            // nothing again, so the older snapshot on disk stays consistent and is kept.
             needsFullRescan = true
-            unlink(store.appending(path: ScanIndex.snapshotName).path)
+            if rootPresent() { unlink(store.appending(path: ScanIndex.snapshotName).path) }
             throw error
         }
         // Advance only after the changes are in the index (spec 6.6).
@@ -387,7 +391,7 @@ public actor LiveIndex {
     }
 
     /// One timer, due when the earliest deferred change's window ends. Prunes paths whose window has passed.
-    private func scheduleFlush() {
+    func scheduleFlush() {
         flushTask?.cancel()
         flushTask = nil
         guard !closed else { return }
@@ -398,9 +402,16 @@ public actor LiveIndex {
         let delay = max(end - now, .zero)
         flushTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
-            guard !Task.isCancelled else { return }
-            await self?.flushDue()
+            await self?.flushFromTimer()
         }
+    }
+
+    /// The timer is cancelled only while it sleeps: once it starts flushing it lets go of `flushTask`, so a batch that
+    /// arrives meanwhile (which reschedules) can't cancel the scan it is running.
+    private func flushFromTimer() async {
+        guard !Task.isCancelled else { return }
+        flushTask = nil
+        await flushDue()
     }
 
     /// The highest event ID the stored one may reach: just below the oldest change still deferred (spec 6.6). Quitting
@@ -484,9 +495,14 @@ public actor LiveIndex {
         self.fault = fault
     }
 
-    /// Test hook: replaces `statfs` for finding the root's mount point.
-    func injectMountPointLookup(_ lookup: @escaping @Sendable (String) -> String?) {
+    /// Test hook: replaces `statfs` for finding the root's mount point; throwing fails `open()`.
+    func injectMountPointLookup(_ lookup: @escaping @Sendable (String) throws -> String) {
         mountPointLookup = lookup
+    }
+
+    /// Test hook, before `open()`: don't start the FSEvents watcher.
+    func disableWatcher() {
+        watchEvents = false
     }
 
     /// Test hook: the clock the coalescing window is measured with.
@@ -672,7 +688,7 @@ public actor LiveIndex {
     }
 
     private func startWatching(device: dev_t) throws {
-        guard let index, index.fseventsUUID != nil else { return }
+        guard watchEvents, let index, index.fseventsUUID != nil else { return }
         let watcher = EventWatcher(device: device, since: index.lastEventID)
         try watcher.start()
         self.watcher = watcher

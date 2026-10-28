@@ -11,14 +11,15 @@ private final class ManualClock: Sendable {
     var now: ContinuousClock.Instant { start + offset.withLock { $0 } }
 }
 
-/// Opens a fixture index. The returned base is far above any real event ID, so the live watcher's own events never
-/// collide with the synthetic ones.
+/// Opens a fixture index with no FSEvents watcher. The returned base is far above any real event ID.
 private func opened(_ spec: [String: Int], window: Duration, clock: ManualClock? = nil,
                     store: URL? = nil) async throws -> (LiveIndex, String, UInt64, URL) {
     let root = try Fixtures.tree(spec)
     let store = try store ?? Fixtures.tempDir()
     let live = LiveIndex(volumeRoot: root, store: store, coalesceWindow: window)
     if let clock { await live.injectClock { clock.now } }
+    // The fixture's own creation events can replay as soon as a watcher starts; only the test's changes may count.
+    await live.disableWatcher()
     _ = try await live.open()
     return (live, Fixtures.realPath(root), await live.withIndex { $0.lastEventID } + 1_000_000_000, store)
 }
@@ -133,6 +134,45 @@ private func change(_ path: String, _ id: UInt64, subtree: Bool = false) -> FSCh
 
 @Test func missingMountPointFailsOpen() async throws {
     let live = LiveIndex(volumeRoot: try Fixtures.tree(["a/f.bin": 10]), store: try Fixtures.tempDir())
-    await live.injectMountPointLookup { _ in nil }
+    await live.injectMountPointLookup { _ in throw DiskEngineError.posix("statfs", EIO) }
     await #expect(throws: (any Error).self) { try await live.open() }
+}
+
+// A watcher batch arriving while a flush is scanning must not cut that scan short (fix round 1). Every enqueue ends by
+// rescheduling the flush timer; the hook does exactly that, on the actor, while the flush is about to scan a/new.
+@Test func anEnqueueDuringAFlushScanDoesNotCutItShort() async throws {
+    let (live, root, base, _) = try await opened(["a/f.bin": 10, "b/g.bin": 10], window: .milliseconds(300))
+    await live.enqueue([change(root + "/a", base + 1)])
+    try Fixtures.write(URL(filePath: root + "/a/new/deep/h.bin"), bytes: 2_000_000)
+    await live.enqueue([change(root + "/a", base + 2)])  // deferred: the timer flushes it, and its relist finds a/new
+    let fired = OSAllocatedUnfairLock(initialState: false)
+    await live.injectBeforeScan {
+        guard !fired.withLock({ let was = $0; $0 = true; return was }) else { return }
+        live.assumeIsolated { $0.scheduleFlush() }
+    }
+    for _ in 0..<100 where await live.withIndex({ $0.lastEventID }) < base + 2 { try await Task.sleep(for: .milliseconds(50)) }
+    #expect(fired.withLock { $0 })
+    #expect(await live.withIndex { $0.pending.isEmpty })
+    #expect(await live.withIndex { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: URL(filePath: root)))
+    #expect(await live.withIndex { $0.lastEventID } == base + 2)
+    try await live.close()
+}
+
+// Defence in depth: an apply whose scan is cancelled never counts as applied (fix round 1).
+@Test func aCancelledApplyScanIsAFailure() async throws {
+    let (live, root, base, _) = try await opened(["a/f.bin": 10], window: .seconds(10), clock: ManualClock())
+    let before = await live.withIndex { $0.lastEventID }
+    try Fixtures.write(URL(filePath: root + "/a/new/deep/h.bin"), bytes: 2_000_000)
+    await live.injectBeforeScan { withUnsafeCurrentTask { $0?.cancel() } }
+    let applied = Task { try await live.apply([change(root + "/a", base + 1)]) }
+    await #expect(throws: (any Error).self) { try await applied.value }
+    #expect(await live.withIndex { $0.lastEventID } == before)
+    await live.injectBeforeScan(nil)
+    // The next apply rescans everything, so nothing the cut-short scan missed stays missing.
+    try await live.apply([change(root + "/a", base + 2)])
+    #expect(await live.stats().fullRescans == 1)
+    #expect(await live.withIndex { $0.pending.isEmpty })
+    #expect(await live.withIndex { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: URL(filePath: root)))
+    #expect(await live.withIndex { $0.lastEventID } == base + 2)
+    try await live.close()
 }
