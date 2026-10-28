@@ -25,17 +25,17 @@ public final class DiskScanner: Sendable {
     public let workers: Int
     public let lister: DirectoryLister
     /// Read as unreadable without being opened (no Full Disk Access); nil opens everything.
-    public let containers: ProtectedContainers?
+    public let protected: ProtectedData?
     public let progress: AsyncStream<ScanProgress>
     private let progressSink: AsyncStream<ScanProgress>.Continuation
 
     public init(root: URL, storage: URL, workers: Int = ProcessInfo.processInfo.activeProcessorCount,
-                lister: DirectoryLister = .shared, containers: ProtectedContainers? = nil) {
+                lister: DirectoryLister = .shared, protected: ProtectedData? = nil) {
         self.root = root
         self.storage = storage
         self.workers = max(1, workers)
         self.lister = lister
-        self.containers = containers
+        self.protected = protected
         (progress, progressSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
@@ -94,7 +94,7 @@ public final class DiskScanner: Sendable {
         var failure: (any Error)?
         var stopped = false
         let lister = self.lister
-        let containers = self.containers
+        let protected = self.protected
 
         await withTaskGroup(of: DirectoryListing.self) { group in
             func launch() {
@@ -103,11 +103,12 @@ public final class DiskScanner: Sendable {
                     head += 1
                     let path = index.path(of: folder, rootPath: rootPath)
                     group.addTask(priority: .utility) {
-                        if containers?.covers(path) == true {
+                        if protected?.covers(path) == true {
                             return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
                         }
-                        // A folder that hangs reads as timed out: marked stale, and the walk goes on without it.
-                        guard case .listed(let listing) = await lister.list(path: path, folder: folder) else {
+                        // A folder that hangs reads as timed out: marked stale, and the walk goes on without it. A
+                        // full cap never skips a scan's folder.
+                        guard case .listed(let listing) = await lister.list(path: path, folder: folder, whenFull: .worker) else {
                             return DirectoryListing(folder: folder, outcome: .timedOut, entries: [])
                         }
                         return listing

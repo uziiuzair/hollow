@@ -169,9 +169,9 @@ public final class DriveController: ObservableObject {
     private func warmBody() async {
         guard !unmounting else { return }
         if index == nil {
-            // Without Full Disk Access, other apps' containers are marked unreadable unopened; the retry below relists them.
+            // Without Full Disk Access, privacy-protected folders are marked unreadable unopened; the retry below relists them.
             let live = LiveIndex(volumeRoot: volume.url, store: store, exclusions: exclusions,
-                                 protectedContainers: ProtectedContainers(home: NSHomeDirectory(), ownBundleID: AppIdentity.bundleID),
+                                 protectedData: ProtectedData(home: NSHomeDirectory(), ownBundleID: AppIdentity.bundleID),
                                  fullDiskAccess: fullDiskAccess)
             // Without a snapshot or a journal, open() will do a full scan.
             activity = (snapshotExists && hasJournal) ? .opening : .scanning

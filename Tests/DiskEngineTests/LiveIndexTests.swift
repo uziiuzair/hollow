@@ -42,9 +42,11 @@ import Testing
     try Fixtures.write(root.appending(path: "a/b/c/d/g.bin"), bytes: 1_500_000)
     try FileManager.default.removeItem(at: root.appending(path: "a/b/c/f.bin"))
     let base = Fixtures.realPath(root)
+    // Real IDs: a rescan request at or below where the opening scan began is already covered by it.
+    let id = await live.withIndex { $0.lastEventID } + 1_000_000_000
     try await live.apply([
-        FSChange(path: base + "/a", id: 5, rescanSubtree: true, historyLost: false),
-        FSChange(path: "/somewhere/else", id: 6, rescanSubtree: false, historyLost: false),
+        FSChange(path: base + "/a", id: id + 5, rescanSubtree: true, historyLost: false),
+        FSChange(path: "/somewhere/else", id: id + 6, rescanSubtree: false, historyLost: false),
     ])
     #expect(await live.withIndex { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root))
     try await live.close()

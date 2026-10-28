@@ -1,6 +1,7 @@
 import CoreServices
 import Darwin
 import Foundation
+import os
 
 /// One changed folder reported by FSEvents.
 public struct FSChange: Sendable, Equatable {
@@ -34,12 +35,17 @@ public struct FSChange: Sendable, Equatable {
 /// Follows FSEvents for a whole device, from a stored event ID, and delivers one
 /// batch of changes per callback.
 public final class EventWatcher: @unchecked Sendable {
+    #if DEBUG
+    fileprivate static let log = Logger(subsystem: "com.ooozzy.diskinventory", category: "index")
+    #endif
     public let changes: AsyncStream<[FSChange]>
     private let sink: AsyncStream<[FSChange]>.Continuation
     private let device: dev_t
     private let since: UInt64
     private let latency: Double
-    private let queue = DispatchQueue(label: "EventWatcher", qos: .utility)
+    /// Above utility: a callback delayed by a busy machine lets fseventsd's buffer for us overflow, which drops events
+    /// and asks for a full rescan.
+    private let queue = DispatchQueue(label: "EventWatcher", qos: .userInitiated)
     // Touched only from start()/stop(), which callers don't race.
     private var stream: FSEventStreamRef?
 
@@ -65,6 +71,12 @@ public final class EventWatcher: @unchecked Sendable {
             batch.reserveCapacity(count)
             for i in 0..<count {
                 if let change = FSChange.from(path: String(cString: cPaths[i]), flags: flags[i], id: ids[i]) {
+                    #if DEBUG
+                    if change.historyLost || change.rescanSubtree {
+                        let raw = String(flags[i], radix: 16), path = change.path, id = change.id
+                        EventWatcher.log.info("event asks for a rescan: \(path, privacy: .public) id \(id) flags 0x\(raw, privacy: .public)")
+                    }
+                    #endif
                     batch.append(change)
                 }
             }

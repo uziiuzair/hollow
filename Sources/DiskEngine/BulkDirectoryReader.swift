@@ -82,12 +82,15 @@ struct BulkDirectoryReader {
 
     init() {}
 
-    mutating func list(path: String, folder: FolderID) -> DirectoryListing {
+    /// `opened` runs as soon as open() has returned, whether or not it succeeded (`DirectoryLister`'s deadline).
+    mutating func list(path: String, folder: FolderID, opened: () -> Void = {}) -> DirectoryListing {
         // Paths are rebuilt from the index, which never holds a symlinked folder, so a symlink anywhere on the way is
         // refused (O_NOFOLLOW_ANY covers O_NOFOLLOW; the two together are EINVAL).
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC)
+        let openError = errno
+        opened()
         if fd < 0 {
-            let outcome: ListingOutcome = (errno == EACCES || errno == EPERM) ? .unreadable : .vanished
+            let outcome: ListingOutcome = (openError == EACCES || openError == EPERM) ? .unreadable : .vanished
             return DirectoryListing(folder: folder, outcome: outcome, entries: [])
         }
         defer { close(fd) }

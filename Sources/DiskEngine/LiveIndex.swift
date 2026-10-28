@@ -146,12 +146,16 @@ public actor LiveIndex {
     /// their events count as applied (with what the folder had), so they never hold back the stored event ID.
     private var staleRetry: [String: ContinuousClock.Instant] = [:]
     private var lister = DirectoryLister.shared
-    /// Other apps' containers, never opened while `fullDiskAccess` says no (they'd wait on a privacy prompt).
-    private let protectedContainers: ProtectedContainers?
+    /// Privacy-protected folders, never opened while `fullDiskAccess` says no (they'd wait on a privacy prompt).
+    private let protectedData: ProtectedData?
     private let fullDiskAccess: @Sendable () -> Bool
     /// The last `fullDiskAccess` answer and when it was asked; asked again after a minute.
     private var hasFullDiskAccess = true
     private var accessCheckedAt: ContinuousClock.Instant?
+    /// The FSEvents ID current when the last full scan or rescan began: it covers every change up to there, so a
+    /// lost-history or rescan event at or below it is already handled.
+    private var coveredThrough: UInt64 = 0
+    private var currentEventID: @Sendable () -> UInt64 = { FSEventsGetCurrentEventId() }
     private var now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     /// Tests only: false leaves FSEvents unwatched, so only the changes a test feeds in reach the index.
     private var watchEvents = true
@@ -164,9 +168,9 @@ public actor LiveIndex {
 
     public init(volumeRoot: URL, store: URL, saveDebounce: Duration = .seconds(30), compactAbove: Double = 0.25,
                 exclusions: Set<String> = [], coalesceWindow: Duration = .seconds(10),
-                protectedContainers: ProtectedContainers? = nil,
+                protectedData: ProtectedData? = nil,
                 fullDiskAccess: @escaping @Sendable () -> Bool = { true }) {
-        self.protectedContainers = protectedContainers
+        self.protectedData = protectedData
         self.fullDiskAccess = fullDiskAccess
         self.coalesceWindow = coalesceWindow
         self.exclusions = ExclusionPaths.normalized(exclusions)
@@ -216,7 +220,8 @@ public actor LiveIndex {
         }
         var toScan: [FolderID] = []
         for parent in parents.sorted() {
-            guard let folder = index.folder(atRelativePath: parent), !index.folders[Int(folder)].flags.contains(.garbage) else { continue }
+            guard let found = index.folder(atRelativePath: parent), !index.folders[Int(found)].flags.contains(.garbage) else { continue }
+            let folder = listable(found, in: index)
             toScan += try index.relist(await listing(of: folder, in: index)).newFolders
         }
         try fault?()
@@ -255,7 +260,7 @@ public actor LiveIndex {
         guard !closed, let index else { return 0 }
         defer { armStaleRetries(index) }
         // Called once access may have been granted: ask now, so the containers are opened this time.
-        _ = containerGuard(askNow: true)
+        _ = protectedGuard(askNow: true)
         var readable = 0
         var toScan: [FolderID] = []
         // Cancelled (an unmount): the folders not yet relisted stay unreadable and are retried at the next open.
@@ -506,12 +511,13 @@ public actor LiveIndex {
         #if DEBUG
         Self.log.debug("relist \(path, privacy: .public)")
         #endif
-        if containerGuard()?.covers(path) == true {
+        if protectedGuard()?.covers(path) == true {
             return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
         }
-        // Listed fine last time: while every worker slot is taken it is listed inline rather than left stale.
+        // Listed fine last time: while every worker slot is taken it is listed inline; anything else still gets a
+        // worker under the deadline, so a full cap never leaves a folder unread.
         let knownSafe = index.folders[Int(folder)].flags.isDisjoint(with: [.stale, .unreadable, .vanished, .dataless, .garbage])
-        let outcome = await lister.list(path: path, folder: folder, knownSafe: knownSafe)
+        let outcome = await lister.list(path: path, folder: folder, whenFull: knownSafe ? .inline : .worker)
         guard case .listed(let listing) = outcome else {
             #if DEBUG
             Self.log.info("relist \(String(describing: outcome), privacy: .public): \(path, privacy: .public)")
@@ -521,15 +527,25 @@ public actor LiveIndex {
         return listing
     }
 
-    /// The containers to leave unopened: nil with Full Disk Access (or none configured). Asks at most once a minute.
-    private func containerGuard(askNow: Bool = false) -> ProtectedContainers? {
-        guard let protectedContainers else { return nil }
+    /// `folder`, or its nearest ancestor that isn't dataless: a dataless folder is never opened, and its parent's
+    /// listing says whether it still is.
+    private func listable(_ folder: FolderID, in index: ScanIndex) -> FolderID {
+        var folder = folder
+        while index.folders[Int(folder)].flags.contains(.dataless), index.folders[Int(folder)].parent != noFolder {
+            folder = index.folders[Int(folder)].parent
+        }
+        return folder
+    }
+
+    /// The protected folders to leave unopened: nil with Full Disk Access (or none configured). Asks at most once a minute.
+    private func protectedGuard(askNow: Bool = false) -> ProtectedData? {
+        guard let protectedData else { return nil }
         let now = ContinuousClock.now
         if askNow || accessCheckedAt.map({ now - $0 >= .seconds(60) }) ?? true {
             hasFullDiskAccess = fullDiskAccess()
             accessCheckedAt = now
         }
-        return hasFullDiskAccess ? nil : protectedContainers
+        return hasFullDiskAccess ? nil : protectedData
     }
 
     private static func merged(_ a: FSChange, _ b: FSChange) -> FSChange {
@@ -549,27 +565,40 @@ public actor LiveIndex {
 
     private func applyLocked(_ changes: [FSChange], to index: ScanIndex) async throws -> ApplyOutcome {
         applies += 1
+        // Covered by a full scan that began after them: events dropped while it ran must not start another.
+        let covered = coveredThrough
+        let changes = changes.filter { !(($0.historyLost || $0.rescanSubtree) && $0.id <= covered) }
         if needsFullRescan || changes.contains(where: \.historyLost) {
             #if DEBUG
-            let lost = changes.filter(\.historyLost).map(\.path)
+            let lost = changes.filter(\.historyLost).map { "\($0.path) id \($0.id)" }
             Self.log.info("full rescan: after a failed apply \(self.needsFullRescan), lost history at \(lost, privacy: .public)")
             #endif
+            let coverage = currentEventID()
+            // Listed before the reset: a root that hangs keeps the index as it is, and the rescan is tried again.
+            let root = await listing(of: 0, in: index)
+            guard root.outcome != .timedOut else {
+                needsFullRescan = true
+                return .untouched
+            }
             fullRescanCount += 1
             index.resetContents(of: 0)
+            let toScan = try index.integrate(root, rootDevice: index.rootDevice)
             try fault?()
-            try await scan(index, starting: [0])
+            if !toScan.isEmpty { try await scan(index, starting: toScan) }
             needsFullRescan = false
+            coveredThrough = max(coveredThrough, coverage)
             return .full
         } else {
             var relists: Set<FolderID> = []
             var subtrees: Set<FolderID> = []
             for change in changes {
                 guard let relative = relativePath(change.path), !isExcluded(relative) else { continue }
-                var folder = deepestFolder(relative, in: index)
-                // A dataless folder is never opened; its parent's listing says whether it still is.
-                while index.folders[Int(folder)].flags.contains(.dataless), index.folders[Int(folder)].parent != noFolder {
-                    folder = index.folders[Int(folder)].parent
+                let folder = listable(deepestFolder(relative, in: index), in: index)
+                #if DEBUG
+                if change.rescanSubtree && folder == 0 {
+                    Self.log.info("rescan of the root: \(change.path, privacy: .public) id \(change.id)")
                 }
+                #endif
                 if change.rescanSubtree { subtrees.insert(folder) } else { relists.insert(folder) }
             }
 
@@ -661,6 +690,11 @@ public actor LiveIndex {
     /// Test hook, before `open()`: don't start the FSEvents watcher.
     func disableWatcher() {
         watchEvents = false
+    }
+
+    /// Test hook: what counts as the current FSEvents ID when a full scan or rescan begins.
+    func injectCurrentEventID(_ id: @escaping @Sendable () -> UInt64) {
+        currentEventID = id
     }
 
     /// Test hook: the lister every directory read goes through.
@@ -822,8 +856,13 @@ public actor LiveIndex {
         fresh.fseventsUUID = journal
         fresh.exclusions = exclusions
         // Events during the scan are replayed afterwards and re-list what they touch.
-        fresh.lastEventID = FSEventsGetCurrentEventId()
+        fresh.lastEventID = currentEventID()
+        coveredThrough = fresh.lastEventID
         try await scan(fresh, starting: [0])
+        // A root that hung leaves an empty index: never keep (or save) that as the volume.
+        guard !fresh.folders[0].flags.contains(.stale) else {
+            throw DiskEngineError.posix("listing \(rootPath) timed out", ETIMEDOUT)
+        }
         return fresh
     }
 
@@ -832,7 +871,7 @@ public actor LiveIndex {
         let path = rootPath
         let device = rootDevice
         beforeScan?()
-        _ = try await DiskScanner(root: URL(filePath: rootPath), storage: store, lister: lister, containers: containerGuard())
+        _ = try await DiskScanner(root: URL(filePath: rootPath), storage: store, lister: lister, protected: protectedGuard())
             .scan(into: target, starting: starting) { checkpointed in
                 // Folders listed after the volume went away read as vanished; stop, don't save.
                 guard Self.isPresent(path, device: device) else { return .stop }

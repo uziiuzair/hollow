@@ -29,7 +29,8 @@ private final class Hang: Sendable {
     var opened: [String] { state.withLock { $0.opened } }
     func opens(of path: String) -> Int { opened.filter { $0 == path }.count }
 
-    func read(_ path: String, _ folder: FolderID) -> DirectoryListing {
+    /// A blocked listing blocks inside "open()", before `opened` runs.
+    func read(_ path: String, _ folder: FolderID, _ opened: @escaping @Sendable () -> Void) -> DirectoryListing {
         let blocked = state.withLock { s in
             s.opened.append(path)
             return s.paths.contains(path) || s.prefix.map { path.hasPrefix($0) } == true
@@ -38,15 +39,15 @@ private final class Hang: Sendable {
             gate.wait()
             gate.signal()  // lets the next blocked listing go too
         }
-        return DirectoryLister.read(path, folder)
+        return DirectoryLister.read(path, folder, opened)
     }
 }
 
 private func lister(_ hang: Hang, timeout: Duration = .seconds(5), clock: ManualClock? = nil,
-                    read: (@Sendable (String, FolderID) -> DirectoryListing)? = nil) -> DirectoryLister {
+                    read: (@Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing)? = nil) -> DirectoryLister {
     let now: @Sendable () -> ContinuousClock.Instant
     if let clock { now = { clock.now } } else { now = { ContinuousClock.now } }
-    let reader: @Sendable (String, FolderID) -> DirectoryListing = read ?? { hang.read($0, $1) }
+    let reader: @Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing = read ?? { hang.read($0, $1, $2) }
     return DirectoryLister(timeout: timeout, now: now, read: reader)
 }
 
@@ -167,13 +168,14 @@ private func record(_ live: LiveIndex, _ path: String) async -> FolderRecord {
 }
 
 /// The root lists one real file, a dataless (cloud) folder and a local one; everything else reads as usual.
-private func cloudRoot(_ real: String, _ hang: Hang) -> @Sendable (String, FolderID) -> DirectoryListing {
+private func cloudRoot(_ real: String, _ hang: Hang) -> @Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing {
     var info = stat()
     lstat(real, &info)
     let device = info.st_dev
-    return { path, folder in
-        guard path == real else { return hang.read(path, folder) }
-        _ = hang.read("root-listed", folder)
+    return { path, folder, opened in
+        guard path == real else { return hang.read(path, folder, opened) }
+        opened()
+        _ = hang.read("root-listed", folder, {})
         var entries = [RawEntry.dir("cloud"), .dir("local"), .file("f.bin", allocated: 4096)]
         entries[0].flags.insert(.dataless)
         for i in entries.indices { entries[i].device = device }
@@ -232,7 +234,7 @@ private func containerIndex(fullDiskAccess: Bool, hang: Hang) async throws -> (L
                                   "Library/Group Containers/group.com.other/h.bin": 10, "plain/i.bin": 10])
     let real = Fixtures.realPath(root)
     let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir(), coalesceWindow: .seconds(10),
-                         protectedContainers: ProtectedContainers(home: real, ownBundleID: ownID),
+                         protectedData: ProtectedData(home: real, ownBundleID: ownID),
                          fullDiskAccess: { fullDiskAccess })
     await live.injectLister(lister(hang))
     await live.disableWatcher()
@@ -269,7 +271,7 @@ private func containerIndex(fullDiskAccess: Bool, hang: Hang) async throws -> (L
 }
 
 @Test func protectedContainersCoverOtherAppsOnly() {
-    let c = ProtectedContainers(home: "/Users/u", ownBundleID: ownID)
+    let c = ProtectedData(home: "/Users/u/", ownBundleID: ownID)
     #expect(c.covers("/Users/u/Library/Containers/com.other.app"))
     #expect(c.covers("/System/Volumes/Data/Users/u/Library/Containers/com.other.app/Data/Library"))
     #expect(c.covers("/Users/u/Library/Group Containers/ABCDE.group.other"))
@@ -277,6 +279,24 @@ private func containerIndex(fullDiskAccess: Bool, hang: Hang) async throws -> (L
     #expect(!c.covers("/Users/u/Library/Containers"))
     #expect(!c.covers("/Users/u/Library/ContainersX/a"))
     #expect(!c.covers("/Users/v/Library/Containers/com.other.app"))
+    // Our own App Group, plain or team-prefixed.
+    #expect(!c.covers("/Users/u/Library/Group Containers/group.\(ownID)/x"))
+    #expect(!c.covers("/Users/u/Library/Group Containers/ABCDE12345.\(ownID)"))
+}
+
+@Test func protectedDataCoversTheKnownPrivacyFolders() {
+    let c = ProtectedData(home: "/Users/u", ownBundleID: ownID)
+    for folder in ProtectedData.homeFolders {
+        #expect(c.covers("/Users/u/" + folder), "\(folder)")
+        #expect(c.covers("/System/Volumes/Data/Users/u/" + folder + "/deep/er"), "\(folder)")
+    }
+    #expect(ProtectedData.homeFolders.contains("Library/Mail") && ProtectedData.homeFolders.contains("Library/Biome"))
+    #expect(c.covers("/Users/u/Pictures/Photos Library.photoslibrary"))
+    #expect(c.covers("/Users/u/Pictures/Old/Trip.photoslibrary/resources/x"))
+    #expect(!c.covers("/Users/u/Pictures/Screenshots"))
+    #expect(!c.covers("/Users/u/Library/MailExtras"))
+    #expect(!c.covers("/Users/u/Library/Application Support/Other"))
+    #expect(!c.covers("/Users/u/Documents/Library/Mail"))
 }
 
 // Fix round 1: a full worker cap doesn't stop relists of folders that listed fine before.
@@ -296,9 +316,9 @@ private func containerIndex(fullDiskAccess: Bool, hang: Hang) async throws -> (L
     let a = await record(live, "a")
     #expect(a.totalAllocated > 2_000_000)
     #expect(!a.flags.contains(.stale))
-    // Never listed, so not vouched for: left stale for later, not opened without a deadline.
-    #expect(await record(live, "a/sub").flags.contains(.stale))
-    #expect(hang.opens(of: root + "/a/sub") == 0)
+    // Never listed, so not vouched for: still read, by a worker under the deadline (a scan never skips).
+    #expect(await record(live, "a/sub").totalAllocated > 2_000_000)
+    #expect(hang.opens(of: root + "/a/sub") == 1)
     #expect(await live.withIndex { $0.lastEventID } == base + 1)
     try await live.close()
 }
@@ -319,5 +339,134 @@ private func containerIndex(fullDiskAccess: Bool, hang: Hang) async throws -> (L
     #expect(await live.withIndex { $0.folder(atRelativePath: "a/x") } != nil)
     #expect(await live.withIndex { $0.folders[0].totalAllocated } >= before)
     #expect(await live.withIndex { $0.lastEventID } == base + 1)
+    try await live.close()
+}
+
+// Fix round 2.
+
+private func lost(_ path: String, _ id: UInt64) -> FSChange {
+    FSChange(path: path, id: id, rescanSubtree: false, historyLost: true)
+}
+
+/// Four workers stuck in open(): the cap is full.
+private func fillCap(_ folders: DirectoryLister, _ hang: Hang) async {
+    hang.block(under: "/hang/")
+    for i in 0..<4 { _ = await folders.list(path: "/hang/\(i)", folder: 0) }
+}
+
+@Test func aSlowReadPastOpenIsWaitedFor() async throws {
+    let root = try Fixtures.tree(["f.bin": 10])
+    let folders = DirectoryLister(timeout: .milliseconds(200), read: { path, folder, opened in
+        var reader = BulkDirectoryReader()
+        return reader.list(path: path, folder: folder) {
+            opened()
+            usleep(600_000)  // reading a huge folder on a busy machine
+        }
+    })
+    guard case .listed(let listing) = await folders.list(path: Fixtures.realPath(root), folder: 0) else {
+        Issue.record("a worker past open() was abandoned")
+        return
+    }
+    #expect(listing.entries.count == 1)
+    #expect(folders.abandonedCount == 0)
+}
+
+@Test func aFullCapStillScansAnotherVolume() async throws {
+    let hang = Hang()
+    let folders = lister(hang, timeout: .milliseconds(100))
+    defer { hang.release() }
+    await fillCap(folders, hang)
+    let root = try Fixtures.tree(["a/b/f.bin": 2_000_000, "c/g.bin": 1_200_000])
+    let index = try await DiskScanner(root: root, storage: try Fixtures.tempDir(), lister: folders).run().index
+    #expect(index.folders[0].totalAllocated == Fixtures.sumAllocated(under: root))
+    #expect((0..<index.folders.count).allSatisfy { !index.folders[$0].flags.contains(.stale) })
+}
+
+@Test func aLostHistoryRescanWithTheCapFullKeepsACorrectIndex() async throws {
+    let clock = ManualClock()
+    let hang = Hang()
+    let folders = lister(hang, timeout: .milliseconds(100), clock: clock)
+    let root = try Fixtures.tree(["a/b/f.bin": 2_000_000, "c/g.bin": 10])
+    let store = try Fixtures.tempDir()
+    let live = LiveIndex(volumeRoot: root, store: store, coalesceWindow: .seconds(10))
+    await live.injectClock { clock.now }
+    await live.injectLister(folders)
+    await live.disableWatcher()
+    _ = try await live.open()
+    defer { hang.release() }
+    let base = await live.withIndex { $0.lastEventID } + 1_000_000_000
+    await fillCap(folders, hang)
+    try Fixtures.write(root.appending(path: "c/new/h.bin"), bytes: 1_500_000)
+    try await live.apply([lost(Fixtures.realPath(root), base + 1)])
+    #expect(await live.stats().fullRescans == 1)
+    let total = Fixtures.sumAllocated(under: root)
+    #expect(await live.withIndex { $0.folders[0].totalAllocated } == total)
+    try await live.save()
+    #expect(try ScanIndex.load(from: store).folders[0].totalAllocated == total)
+    try await live.close()
+}
+
+@Test func aLostHistoryRescanWhoseRootHangsKeepsTheIndex() async throws {
+    let clock = ManualClock()
+    let hang = Hang()
+    let folders = lister(hang, timeout: .milliseconds(200), clock: clock)
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000])
+    let real = Fixtures.realPath(root)
+    let store = try Fixtures.tempDir()
+    let live = LiveIndex(volumeRoot: root, store: store, coalesceWindow: .seconds(10))
+    await live.injectClock { clock.now }
+    await live.injectLister(folders)
+    await live.disableWatcher()
+    _ = try await live.open()
+    defer { hang.release() }
+    let base = await live.withIndex { $0.lastEventID } + 1_000_000_000
+    let before = await live.withIndex { $0.folders[0].totalAllocated }
+    hang.block(real)
+    try await live.apply([lost(real, base + 1)])
+    #expect(await live.stats().fullRescans == 0)
+    #expect(await live.withIndex { $0.folders[0].totalAllocated } == before)
+    // Nothing empty is saved: the snapshot on disk is still the one from open().
+    try await live.save()
+    #expect(try ScanIndex.load(from: store).folders[0].totalAllocated == before)
+
+    // Once the root reads again, the next apply does the rescan that is still owed.
+    hang.release()
+    for _ in 0..<100 where folders.abandonedCount > 0 { try await Task.sleep(for: .milliseconds(20)) }
+    clock.advance(.seconds(601))
+    try await live.apply([change(real + "/a", base + 2)])
+    #expect(await live.stats().fullRescans == 1)
+    #expect(await live.withIndex { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root))
+    try await live.close()
+}
+
+@Test func lostHistoryCoveredByAFullRescanIsIgnored() async throws {
+    let clock = ManualClock()
+    let (live, root, base) = try await opened(["a/f.bin": 10], clock: clock, lister: DirectoryLister())
+    await live.injectCurrentEventID { base + 10 }
+    try await live.apply([lost(root, base + 1)])
+    #expect(await live.stats().fullRescans == 1)
+    // Dropped while that rescan ran: already covered.
+    try await live.apply([lost(root, base + 5), FSChange(path: root + "/a", id: base + 6, rescanSubtree: true, historyLost: false)])
+    #expect(await live.stats().fullRescans == 1)
+    #expect(await live.stats().subtreesRescanned == 0)
+    #expect(await live.withIndex { $0.lastEventID } == base + 6)
+    try await live.apply([lost(root, base + 11)])
+    #expect(await live.stats().fullRescans == 2)
+    try await live.close()
+}
+
+@Test func reconcileRelistsTheParentOfADatalessFolder() async throws {
+    let root = try Fixtures.tree(["local/g.bin": 10, "cloud/x/h.bin": 10])
+    let real = Fixtures.realPath(root)
+    let hang = Hang()
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir(), coalesceWindow: .seconds(10))
+    await live.injectLister(lister(hang, read: cloudRoot(real, hang)))
+    await live.disableWatcher()
+    _ = try await live.open()
+    let rootListings = hang.opens(of: "root-listed")
+    // Excluding cloud/x reconciles cloud, which is dataless: its parent is listed instead.
+    try await live.setExclusions(["cloud/x"])
+    #expect(hang.opens(of: real + "/cloud") == 0)
+    #expect(hang.opens(of: "root-listed") == rootListings + 1)
     try await live.close()
 }
