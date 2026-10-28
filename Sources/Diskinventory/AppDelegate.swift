@@ -972,17 +972,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminating else { return .terminateLater }
         terminating = true
-        let all = Array(controllers.values)
         unmountApprover?.stop()
         Task { [weak self] in
+            // A move to the Trash in progress finishes first (at most 30 s): stopping it between items would leave some
+            // moved and some not, with no outcome shown.
+            _ = await QuitWait.whileBusy { self?.mapWindow?.isMovingToTrash == true }
+            guard let self else { return }
+            let all = Array(self.controllers.values)
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                self?.finishTermination()
+            }
             await withTaskGroup(of: Void.self) { group in
                 for c in all { group.addTask { await c.cool() } }
             }
-            self?.finishTermination()
-        }
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
-            self?.finishTermination()
+            self.finishTermination()
         }
         return .terminateLater
     }

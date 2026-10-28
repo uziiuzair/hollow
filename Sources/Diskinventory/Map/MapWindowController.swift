@@ -638,6 +638,15 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         model.isVisible = visible
     }
 
+    /// The close button and ⌘W wait while a move to the Trash runs, so its outcome is never lost with the window.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !isMovingToTrash else {
+            NSSound.beep()
+            return false
+        }
+        return true
+    }
+
     func windowWillClose(_ notification: Notification) {
         if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.isVisible,
            panel.dataSource === self {
