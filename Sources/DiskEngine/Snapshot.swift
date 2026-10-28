@@ -47,7 +47,7 @@ extension ScanIndex {
             try putString(fseventsUUID)
 
             for record in folders { try put(record) }
-            try folderNames.bytes.withUnsafeBytes { _ = try out.append($0) }
+            try folderNames.forEachChunk { _ = try out.append($0) }
             for (inode, owner) in hardLinkOwners {
                 try put(inode)
                 try put(owner)
@@ -77,7 +77,7 @@ extension ScanIndex {
                   Int(f.firstFile) + Int(f.bigFileCount) <= fileCount
             else { throw SnapshotError.incompatible("folder \(i) out of range") }
             let offset = Int(f.nameOffset)
-            let length = Int(index.folderNames.bytes[offset]) | Int(index.folderNames.bytes[offset + 1]) << 8
+            let length = Int(index.folderNames.byte(at: offset)) | Int(index.folderNames.byte(at: offset + 1)) << 8
             guard offset + 2 + length <= nameBytes else { throw SnapshotError.incompatible("folder \(i) name out of range") }
         }
         guard index.pending.allSatisfy({ $0 < count }), index.hardLinkOwners.values.allSatisfy({ $0 < count }) else {
@@ -139,7 +139,7 @@ extension ScanIndex {
             let files = try FileTable(directory: directory, keepingRecords: fileCount, nameBytes: fileNameBytes)
             let index = ScanIndex(files: files)
             for _ in 0..<folderCount { index.folders.append(try take(FolderRecord.self)) }
-            index.folderNames = NamePool(bytes: Array(try takeBytes(folderNameBytes)))
+            index.folderNames = NamePool(bytes: try takeBytes(folderNameBytes))
             index.hardLinkOwners.reserveCapacity(hardLinkCount)
             for _ in 0..<hardLinkCount {
                 let inode = try take(UInt64.self)

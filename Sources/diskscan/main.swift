@@ -2,7 +2,7 @@ import Darwin
 import DiskEngine
 import Foundation
 
-// diskscan <path> [--top N] [--memory] [--store <dir>]
+// diskscan <path> [--top N] [--memory] [--hold] [--store <dir>]
 var arguments = Array(CommandLine.arguments.dropFirst())
 @MainActor func option(_ name: String) -> String? {
     guard let flag = arguments.firstIndex(of: name), flag + 1 < arguments.count else { return nil }
@@ -17,8 +17,9 @@ var arguments = Array(CommandLine.arguments.dropFirst())
 let top = option("--top").flatMap(Int.init) ?? 10
 let storeOption = option("--store")
 let showMemory = flag("--memory")
+let hold = flag("--hold")
 guard let target = arguments.first else {
-    FileHandle.standardError.write(Data("usage: diskscan <path> [--top N] [--memory] [--store <dir>]\n".utf8))
+    FileHandle.standardError.write(Data("usage: diskscan <path> [--top N] [--memory] [--hold] [--store <dir>]\n".utf8))
     exit(2)
 }
 
@@ -69,6 +70,7 @@ let storage = FileManager.default.temporaryDirectory.appending(path: "diskscan-\
 try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: storage) }
 
+let baseline = showMemory ? MemoryReport.footprint() : 0
 let result = try await DiskScanner(root: root, storage: storage).run()
 let index = result.index
 let rootRecord = index.folders[0]
@@ -88,11 +90,14 @@ print("unreadable folders: \(result.unreadableFolders)")
 print("peak memory:        \(mb(peak))")
 if showMemory {
     let m = MemoryReport.measure(index)
+    print("baseline:           \(mb(baseline))")
     print("footprint now:      \(mb(m.processFootprint))")
     print("  folder table:     \(mb(UInt64(m.folderTableBytes)))")
     print("  folder names:     \(mb(UInt64(m.folderNameBytes)))")
     print("  hard links:       \(mb(UInt64(m.hardLinkBytes)))")
     print("  pending queue:    \(mb(UInt64(m.pendingBytes)))")
+    let unexplained = Int64(m.processFootprint) - Int64(baseline) - Int64(m.tablesBytes)
+    print("unexplained:        " + String(format: "%.1f MB", Double(unexplained) / 1_000_000))
 }
 if let space = try? VolumeSpace.read(root) {
     print("volume:             \(gb(space.total)) total, \(gb(space.available)) free, \(gb(space.reclaimable)) reclaimable")
@@ -106,4 +111,22 @@ print("\nlargest files:")
 for (file, size) in index.top.sortedDescending().prefix(top) {
     let record = try index.files.record(file)
     print("  \(gb(size).padding(toLength: 10, withPad: " ", startingAt: 0)) \(index.path(of: record.parent, rootPath: root.path))/\(try index.files.name(file))")
+}
+
+// --hold: keep the process and its index alive so heap, vmmap or footprint can attach.
+if hold {
+    print("holding: pid \(getpid()). Attach heap or vmmap now; Ctrl-C exits.")
+    fflush(stdout)
+    signal(SIGINT, SIG_IGN)
+    let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+    interrupt.setEventHandler {
+        try? FileManager.default.removeItem(at: storage) // exit skips the defer above
+        exit(0)
+    }
+    interrupt.resume()
+    // dispatchMain traps under async main; sleeping frees the main queue for the signal source.
+    while true {
+        try await Task.sleep(for: .seconds(3600))
+        withExtendedLifetime(index) {}
+    }
 }

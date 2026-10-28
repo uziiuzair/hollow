@@ -9,10 +9,13 @@ public struct MemoryReport: Sendable {
     /// `phys_footprint`: dirty memory plus compressed memory, as in Activity Monitor.
     public var processFootprint: UInt64
 
+    /// The four tables above, together.
+    public var tablesBytes: Int { folderTableBytes + folderNameBytes + hardLinkBytes + pendingBytes }
+
     public static func measure(_ index: ScanIndex) -> MemoryReport {
         MemoryReport(
             folderTableBytes: index.folders.capacity * MemoryLayout<FolderRecord>.stride,
-            folderNameBytes: index.folderNames.bytes.capacity,
+            folderNameBytes: index.folderNames.capacity,
             // Dictionary storage: key, value and roughly one byte of metadata per bucket.
             hardLinkBytes: index.hardLinkOwners.capacity * (MemoryLayout<UInt64>.stride + MemoryLayout<FolderID>.stride + 1),
             pendingBytes: index.pending.capacity * MemoryLayout<FolderID>.stride,
