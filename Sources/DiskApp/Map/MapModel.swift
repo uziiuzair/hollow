@@ -236,7 +236,17 @@ public final class MapModel: ObservableObject {
         if isOpen, dirty { startBuild() }
     }
 
+    /// The rect index of `key` in `snapshot`, so a hover survives a live rebuild.
+    static func rehover(key: String?, in snapshot: MapSnapshot) -> Int? {
+        guard let key else { return nil }
+        return snapshot.nodes.firstIndex { $0.key == key }
+    }
+
     private func apply(_ result: MapSnapshot?) {
+        // A rebuild of the same level (an update, a resize) keeps the hover while its item exists;
+        // a new level drops it.
+        let old = snapshot
+        let hoveredKey = hovered.flatMap { h in old?.nodes.indices.contains(h) == true ? old?.nodes[h].key : nil }
         hovered = nil
         guard let result else {
             snapshot = nil
@@ -261,6 +271,7 @@ public final class MapModel: ObservableObject {
         pendingZoom = nil
         zoomPath = result.path
         snapshot = result
+        if old?.path == result.path { hovered = Self.rehover(key: hoveredKey, in: result) }
         status = layout.rects.isEmpty ? .empty : .ready
     }
 

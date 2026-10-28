@@ -54,11 +54,12 @@ final class LabelAtlas: @unchecked Sendable {
 
     /// Labels depth-1 rects (in their header when they have one) and childless deeper rects.
     /// Packs rows tallest first into an atlas at most `maxPixels` on a side, and skips what no longer fits.
-    static func build(snapshot: MapSnapshot, scale: CGFloat, dark: Bool, maxPixels: Int = 4096) -> LabelAtlas {
+    /// `darkText[i]` picks near-black over white for rect i (from `TreemapScene.darkLabels`).
+    static func build(snapshot: MapSnapshot, scale: CGFloat, darkText: [Bool], maxPixels: Int = 4096) -> LabelAtlas {
         let layout = snapshot.layout
         let white = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
-        // The system label color: near white in dark mode, near black in light.
-        let bucketText = dark ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.85) : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.85)
+        // The mockup's light-mode text color.
+        let ink = CGColor(srgbRed: 0x16 / 255, green: 0x16 / 255, blue: 0x1D / 255, alpha: 0.9)
         // A header folder keeps its label in its top band (preflight C12).
         let headerHeight = TreemapOptions().headerHeight
         let mapArea = layout.bounds.width * layout.bounds.height
@@ -80,7 +81,7 @@ final class LabelAtlas: @unchecked Sendable {
             let large = mapArea > 0 && r.frame.width * r.frame.height >= 0.2 * mapArea
             guard let plan = LabelFit.plan(name: node.name, size: Format.gb(r.size), growth: growth,
                                            frame: frame, large: large, measure: measure) else { continue }
-            let color = node.kind == nil ? bucketText : white
+            let color = i < darkText.count && darkText[i] ? ink : white
             for l in plan.lines {
                 let ct = line(l.text, l.style, color: color)
                 var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0

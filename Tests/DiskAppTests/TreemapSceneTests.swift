@@ -64,4 +64,22 @@ private func snap(_ rects: [TreemapRect], _ nodes: [MapNode], top: Int) -> MapSn
     #expect(["blockVertex", "blockFragment", "labelVertex", "labelFragment"].allSatisfy { lib.makeFunction(name: $0) != nil })
 }
 
-@Test func uniformsLayoutMatchesTheShader() { #expect(MemoryLayout<TreemapUniforms>.stride == 40) }
+@Test func uniformsLayoutMatchesTheShader() { #expect(MemoryLayout<TreemapUniforms>.stride == 48) }
+
+@Test func labelInkFollowsTheFillUnderIt() {
+    // A small-files bucket inside a green folder, and one at the top level.
+    let s = snap([rect(.folder(1), 10, depth: 1, parent: -1), rect(.small(parent: 0, files: 3, folders: 0), 5, depth: 1, parent: -1),
+                  rect(.small(parent: 1, files: 3, folders: 0), 4, depth: 2, parent: 0)],
+                 [MapNode(key: "a", name: "a", kind: .appData, growth: 0, isFolder: true),
+                  MapNode(key: "#small", name: "s", kind: nil, growth: 0, isFolder: false),
+                  MapNode(key: "a#small", name: "s", kind: nil, growth: 0, isFolder: false)], top: 2)
+    let light = TreemapScene.darkLabels(instances: TreemapScene.instances(snapshot: s, dark: false), layout: s.layout, dark: false)
+    // Kind fills and a bucket on a dark green fill take white text; a bucket on the light window takes dark text.
+    #expect(light == [false, true, false])
+    let dark = TreemapScene.darkLabels(instances: TreemapScene.instances(snapshot: s, dark: true), layout: s.layout, dark: true)
+    #expect(dark == [false, false, false])
+}
+
+@Test func lightModeOutlineGetsAnInkRing() {
+    #expect(TreemapScene.outlineRing(dark: false) == 1 && TreemapScene.outlineRing(dark: true) == 0)
+}

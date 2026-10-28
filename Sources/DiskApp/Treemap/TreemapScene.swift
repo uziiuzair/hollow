@@ -28,7 +28,7 @@ public struct BlockInstance: Equatable, Sendable {
     public static let bucketFlag: UInt32 = 2
 }
 
-/// Per-frame values. Field for field the same as `Uniforms` in `TreemapScene.shaderSource` (stride 40).
+/// Per-frame values. Field for field the same as `Uniforms` in `TreemapScene.shaderSource` (stride 48).
 public struct TreemapUniforms: Equatable, Sendable {
     /// The view's size in points.
     public var viewport: SIMD2<Float>
@@ -41,9 +41,12 @@ public struct TreemapUniforms: Equatable, Sendable {
     /// -1 means none.
     public var outlinedTop: Int32
     public var labelAlpha: Float
+    /// 1 adds a dark ring inside the white outline, so it reads on light fills (light mode).
+    public var outlineRing: Float
 
     public init(viewport: SIMD2<Float> = .zero, scale: SIMD2<Float> = .one, offset: SIMD2<Float> = .zero,
-                pixelsPerPoint: Float = 2, hoveredTop: Int32 = -1, outlinedTop: Int32 = -1, labelAlpha: Float = 1) {
+                pixelsPerPoint: Float = 2, hoveredTop: Int32 = -1, outlinedTop: Int32 = -1, labelAlpha: Float = 1,
+                outlineRing: Float = 0) {
         self.viewport = viewport
         self.scale = scale
         self.offset = offset
@@ -51,6 +54,7 @@ public struct TreemapUniforms: Equatable, Sendable {
         self.hoveredTop = hoveredTop
         self.outlinedTop = outlinedTop
         self.labelAlpha = labelAlpha
+        self.outlineRing = outlineRing
     }
 }
 
@@ -102,6 +106,38 @@ public enum TreemapScene {
         return min(1, Float(Double(growth) / Double(size)))
     }
 
+    /// The window color the map is drawn on (the renderer's clear color), sRGB grey.
+    static func background(dark: Bool) -> Float { dark ? 0.196 : 0.925 }
+
+    /// Whether each rect's label should be dark (near-black) rather than white: true when the
+    /// fill under it, composited over its parents and the window, is light. Parents come
+    /// before children in `layout.rects`.
+    public static func darkLabels(instances: [BlockInstance], layout: TreemapLayout, dark: Bool) -> [Bool] {
+        let window = SIMD3<Float>(repeating: background(dark: dark))
+        var fills: [SIMD3<Float>] = []
+        fills.reserveCapacity(instances.count)
+        var out: [Bool] = []
+        out.reserveCapacity(instances.count)
+        for (i, inst) in instances.enumerated() {
+            let p = i < layout.rects.count ? layout.rects[i].parent : -1
+            let under = p >= 0 && p < fills.count ? fills[p] : window
+            let c = inst.color
+            let fill = SIMD3(c.x, c.y, c.z) * c.w + under * (1 - c.w)
+            fills.append(fill)
+            out.append(luminance(fill) > 0.4)
+        }
+        return out
+    }
+
+    /// WCAG relative luminance of an sRGB color.
+    static func luminance(_ rgb: SIMD3<Float>) -> Float {
+        func linear(_ v: Float) -> Float { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * linear(rgb.x) + 0.7152 * linear(rgb.y) + 0.0722 * linear(rgb.z)
+    }
+
+    /// The uniform for the hover outline's dark ring: on in light mode only.
+    public static func outlineRing(dark: Bool) -> Float { dark ? 0 : 1 }
+
     public struct Appearance: Equatable, Sendable {
         public var dimmed: Bool
         /// Width in points of the white inner outline, 0 for none.
@@ -149,6 +185,7 @@ public enum TreemapScene {
         int hoveredTop;
         int outlinedTop;
         float labelAlpha;
+        float outlineRing;
     };
 
     static float4 toClip(float2 p, constant Uniforms &u) {
@@ -216,11 +253,13 @@ public enum TreemapScene {
             }
         }
 
-        // White inner outline.
+        // White inner outline; in light mode a 1 pt dark ring just inside it.
         if (in.outline > 0.0) {
             float o = saturate((d + in.outline) * u.pixelsPerPoint + 0.5);
+            float ring = (saturate((d + in.outline + 1.0) * u.pixelsPerPoint + 0.5) - o) * u.outlineRing;
+            rgb = mix(rgb, float3(0.086, 0.086, 0.114), ring * 0.85);
             rgb = mix(rgb, float3(1.0), o);
-            a = mix(a, 1.0, o);
+            a = mix(a, 1.0, max(o, ring));
         }
 
         if (in.dim > 0.0) { rgb = dimmed(rgb); }

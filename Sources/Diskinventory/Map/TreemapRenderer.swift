@@ -80,6 +80,7 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
         generation += 1
         let generation = self.generation
         pending?.cancel()
+        uniforms.outlineRing = TreemapScene.outlineRing(dark: dark)
         let scale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let box = DeviceBox(device: device)
         pending = Task.detached(priority: .userInitiated) { [weak self] in
@@ -94,7 +95,8 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
     nonisolated private static func makeScene(_ snapshot: MapSnapshot, dark: Bool, scale: CGFloat, device: MTLDevice) -> Scene? {
         var instances = TreemapScene.instances(snapshot: snapshot, dark: dark)
         guard !Task.isCancelled else { return nil }
-        let atlas = LabelAtlas.build(snapshot: snapshot, scale: scale, dark: dark)
+        let darkText = TreemapScene.darkLabels(instances: instances, layout: snapshot.layout, dark: dark)
+        let atlas = LabelAtlas.build(snapshot: snapshot, scale: scale, darkText: darkText)
         guard !Task.isCancelled else { return nil }
         var quads = atlas.quads
         let blocks = instances.isEmpty ? nil : device.makeBuffer(

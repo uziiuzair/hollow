@@ -105,3 +105,17 @@ import Testing
     await m.open(path: "e", select: nil); await m.settle()
     #expect(m.status == .empty && m.statusMessage == "Nothing here takes up space.")
 }
+
+@MainActor @Test func hoverSurvivesALiveRebuildWhileItsItemExists() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000, "b/g.bin": 1_200_000]); let m = model(src, throttle: .milliseconds(10))
+    await m.open(path: "", select: nil); await m.settle()
+    let b = try #require(m.snapshot?.nodes.firstIndex { $0.key == "b" })
+    m.hovered = b
+    m.sourceChanged(); await m.settle()
+    #expect(m.hovered.map { m.snapshot!.nodes[$0].key } == "b")
+    // Hovering something that is gone after the rebuild clears the hover.
+    let gone = MapSnapshot(path: "", rootPath: "/", crumbs: [], total: 0, period: 7,
+                           layout: TreemapLayout(rects: [], bounds: .zero, topLevelCount: 0), nodes: [], list: [])
+    #expect(MapModel.rehover(key: "b", in: gone) == nil)
+    #expect(MapModel.rehover(key: nil, in: m.snapshot!) == nil)
+}

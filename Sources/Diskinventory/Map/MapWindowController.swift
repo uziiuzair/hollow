@@ -11,6 +11,8 @@ import SwiftUI
 @MainActor
 final class MapWindowController: NSWindowController, NSWindowDelegate {
     let uuid: String
+    /// The controller this window holds; a remount brings a new one, which this window can't use.
+    private(set) weak var driveController: DriveController?
     var onClose: (() -> Void)?
     var onFirstFrame: (() -> Void)?
 
@@ -23,6 +25,7 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
 
     init(controller: DriveController, drive: KnownDrive, path: String, select: String?) {
         uuid = drive.uuid
+        driveController = controller
         let model = MapModel(source: controller, driveName: drive.name,
                              reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
         let ui = MapWindowState(driveName: drive.name,

@@ -4,6 +4,7 @@ import DiskApp
 import DiskEngine
 import ServiceManagement
 import os
+import QuartzCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -45,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let mapLog = Logger(subsystem: AppIdentity.bundleID, category: "map")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installMainMenu()
         let quit = NSMenuItem(title: "Quit \(AppIdentity.name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
@@ -94,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { [weak self] in self?.showPanel(keepOpen: true) }
         }
         if CommandLine.arguments.contains("--show-map"), let id = internalUUID {
+            startHeartbeat()
             DispatchQueue.main.async { [weak self] in self?.openMap(uuid: id, focus: nil) }
         }
         // --map-snapshot <dir>: with --show-map, writes the window's PNGs once the map is drawn.
@@ -198,6 +201,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let task = unmounts[uuid] { return task }
         guard let c = controllers[uuid] else { return nil }
         _ = try? registry.upsert(c.volume, space: c.space, now: .now)
+        // The map window holds this controller; it can't outlive the mount.
+        if mapWindow?.uuid == uuid { mapWindow?.close() }
         let task = Task { [weak self] in
             await c.willUnmount()
             guard let self else { return }
@@ -391,6 +396,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
     }
 
+    #if DEBUG
+    private var heartbeat: Timer?
+    private var heartbeatActivity: NSObjectProtocol?
+
+    /// A 100 ms main-thread timer that logs every gap over 50 ms past its due time, with the
+    /// longest so far. App Nap is held off so a hidden or locked screen doesn't stretch it.
+    private func startHeartbeat() {
+        heartbeatActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .latencyCritical], reason: "main-thread heartbeat")
+        heartbeatLast = CACurrentMediaTime()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.beat() }
+        }
+        timer.tolerance = 0
+        RunLoop.main.add(timer, forMode: .common)
+        heartbeat = timer
+        DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
+            guard let self else { return }
+            self.mapLog.info("heartbeat done: longest main-thread gap \(Int(self.heartbeatLongest)) ms")
+        }
+    }
+
+    private var heartbeatLast = 0.0
+    private var heartbeatLongest = 0.0
+
+    private func beat() {
+        let now = CACurrentMediaTime()
+        let late = (now - heartbeatLast - 0.1) * 1000
+        heartbeatLast = now
+        heartbeatLongest = max(heartbeatLongest, late)
+        if late > 16 { mapLog.info("main thread late \(Int(late)) ms (longest \(Int(self.heartbeatLongest)) ms)") }
+    }
+    #endif
+
+    // MARK: Main menu
+
+    /// Shown only while the map window makes the app regular; gives the window ⌘W, ⌘M, ⌘Q,
+    /// the search field's Edit shortcuts and a Window menu.
+    private func installMainMenu() {
+        let bar = NSMenu()
+        for spec in MainMenuSpec.menus(appName: AppIdentity.name) {
+            let menu = NSMenu(title: spec.title)
+            for entry in spec.items {
+                switch entry {
+                case .separator:
+                    menu.addItem(.separator())
+                case .item(let i):
+                    let item = NSMenuItem(title: i.title, action: NSSelectorFromString(i.selector), keyEquivalent: i.key)
+                    var mask: NSEvent.ModifierFlags = []
+                    if i.modifiers.contains(.command) { mask.insert(.command) }
+                    if i.modifiers.contains(.shift) { mask.insert(.shift) }
+                    if i.modifiers.contains(.option) { mask.insert(.option) }
+                    if i.modifiers.contains(.control) { mask.insert(.control) }
+                    item.keyEquivalentModifierMask = mask
+                    menu.addItem(item)
+                }
+            }
+            let top = NSMenuItem(title: spec.title, action: nil, keyEquivalent: "")
+            top.submenu = menu
+            bar.addItem(top)
+            if spec.isWindowsMenu { NSApp.windowsMenu = menu }
+        }
+        NSApp.mainMenu = bar
+    }
+
     // MARK: Map window
 
     /// Opens the map for drive `uuid`: at the root when `focus` is nil or empty, else at
@@ -405,7 +475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             path = focus.lastIndex(of: "/").map { String(focus[..<$0]) } ?? ""
             select = focus
         }
-        if let window = mapWindow, window.uuid == uuid {
+        if let window = mapWindow, window.uuid == uuid, window.driveController === controller {
             window.show(path: path, select: select)
         } else {
             if let old = mapWindow {
