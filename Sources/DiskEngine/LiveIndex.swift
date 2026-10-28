@@ -155,7 +155,8 @@ public actor LiveIndex {
     /// The FSEvents ID current when the last full scan or rescan began: it covers every change up to there, so a
     /// lost-history or rescan event at or below it is already handled.
     private var coveredThrough: UInt64 = 0
-    private var currentEventID: @Sendable () -> UInt64 = { FSEventsGetCurrentEventId() }
+    /// Tests only, when set: replaces the device's own latest event ID.
+    private var currentEventIDHook: (@Sendable () -> UInt64)?
     private var now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     /// Tests only: false leaves FSEvents unwatched, so only the changes a test feeds in reach the index.
     private var watchEvents = true
@@ -514,10 +515,7 @@ public actor LiveIndex {
         if protectedGuard()?.covers(path) == true {
             return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
         }
-        // Listed fine last time: while every worker slot is taken it is listed inline; anything else still gets a
-        // worker under the deadline, so a full cap never leaves a folder unread.
-        let knownSafe = index.folders[Int(folder)].flags.isDisjoint(with: [.stale, .unreadable, .vanished, .dataless, .garbage])
-        let outcome = await lister.list(path: path, folder: folder, whenFull: knownSafe ? .inline : .worker)
+        let outcome = await lister.list(path: path, folder: folder)
         guard case .listed(let listing) = outcome else {
             #if DEBUG
             Self.log.info("relist \(String(describing: outcome), privacy: .public): \(path, privacy: .public)")
@@ -567,7 +565,7 @@ public actor LiveIndex {
         applies += 1
         // Covered by a full scan that began after them: events dropped while it ran must not start another.
         let covered = coveredThrough
-        let changes = changes.filter { !(($0.historyLost || $0.rescanSubtree) && $0.id <= covered) }
+        let changes = changes.filter { !(($0.historyLost || $0.rescanSubtree) && !$0.idsWrapped && $0.id <= covered) }
         if needsFullRescan || changes.contains(where: \.historyLost) {
             #if DEBUG
             let lost = changes.filter(\.historyLost).map { "\($0.path) id \($0.id)" }
@@ -694,7 +692,12 @@ public actor LiveIndex {
 
     /// Test hook: what counts as the current FSEvents ID when a full scan or rescan begins.
     func injectCurrentEventID(_ id: @escaping @Sendable () -> UInt64) {
-        currentEventID = id
+        currentEventIDHook = id
+    }
+
+    /// The latest event ID on this volume's own stream, the scale its events (and so the drop rule) use.
+    private func currentEventID() -> UInt64 {
+        currentEventIDHook?() ?? FSEventsGetLastEventIdForDeviceBeforeTime(rootDevice, CFAbsoluteTimeGetCurrent())
     }
 
     /// Test hook: the lister every directory read goes through.
@@ -856,8 +859,8 @@ public actor LiveIndex {
         fresh.fseventsUUID = journal
         fresh.exclusions = exclusions
         // Events during the scan are replayed afterwards and re-list what they touch.
-        fresh.lastEventID = currentEventID()
-        coveredThrough = fresh.lastEventID
+        fresh.lastEventID = FSEventsGetCurrentEventId()
+        coveredThrough = currentEventID()
         try await scan(fresh, starting: [0])
         // A root that hung leaves an empty index: never keep (or save) that as the volume.
         guard !fresh.folders[0].flags.contains(.stale) else {

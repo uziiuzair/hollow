@@ -13,12 +13,15 @@ public struct FSChange: Sendable, Equatable {
     public var rescanSubtree: Bool
     /// Event history can't be trusted any more; only a full rescan is safe.
     public var historyLost: Bool
+    /// Event IDs started over, so this one says nothing about what came before it (never "already covered").
+    public var idsWrapped: Bool
 
-    public init(path: String, id: UInt64, rescanSubtree: Bool, historyLost: Bool) {
+    public init(path: String, id: UInt64, rescanSubtree: Bool, historyLost: Bool, idsWrapped: Bool = false) {
         self.path = path
         self.id = id
         self.rescanSubtree = rescanSubtree
         self.historyLost = historyLost
+        self.idsWrapped = idsWrapped
     }
 
     public static func from(path: String, flags: FSEventStreamEventFlags, id: UInt64) -> FSChange? {
@@ -26,9 +29,9 @@ public struct FSChange: Sendable, Equatable {
         if has(kFSEventStreamEventFlagHistoryDone) { return nil }
         let mustScan = has(kFSEventStreamEventFlagMustScanSubDirs)
         let dropped = has(kFSEventStreamEventFlagUserDropped) || has(kFSEventStreamEventFlagKernelDropped)
-        let historyLost = has(kFSEventStreamEventFlagEventIdsWrapped) || has(kFSEventStreamEventFlagRootChanged)
-            || (mustScan && dropped)
-        return FSChange(path: path, id: id, rescanSubtree: mustScan, historyLost: historyLost)
+        let wrapped = has(kFSEventStreamEventFlagEventIdsWrapped)
+        let historyLost = wrapped || has(kFSEventStreamEventFlagRootChanged) || (mustScan && dropped)
+        return FSChange(path: path, id: id, rescanSubtree: mustScan, historyLost: historyLost, idsWrapped: wrapped)
     }
 }
 

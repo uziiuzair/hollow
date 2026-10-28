@@ -106,9 +106,9 @@ public final class DiskScanner: Sendable {
                         if protected?.covers(path) == true {
                             return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
                         }
-                        // A folder that hangs reads as timed out: marked stale, and the walk goes on without it. A
-                        // full cap never skips a scan's folder.
-                        guard case .listed(let listing) = await lister.list(path: path, folder: folder, whenFull: .worker) else {
+                        // A folder that hangs, or finds no thread in time, reads as timed out: marked stale, and
+                        // the walk goes on without it.
+                        guard case .listed(let listing) = await lister.list(path: path, folder: folder) else {
                             return DirectoryListing(folder: folder, outcome: .timedOut, entries: [])
                         }
                         return listing

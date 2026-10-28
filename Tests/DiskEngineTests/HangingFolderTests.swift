@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 import os
 import Testing
@@ -16,39 +17,45 @@ private final class ManualClock: Sendable {
 
 /// Blocks the listings of chosen paths until released, and records every path listed.
 private final class Hang: Sendable {
-    private let state = OSAllocatedUnfairLock(initialState: (paths: Set<String>(), prefix: String?.none, opened: [String]()))
+    private let state = OSAllocatedUnfairLock(initialState: (paths: Set<String>(), prefix: String?.none, opened: [String](),
+                                                             reading: String?.none))
     private let gate = DispatchSemaphore(value: 0)
 
     func block(_ path: String) { state.withLock { _ = $0.paths.insert(path) } }
     func block(under prefix: String) { state.withLock { $0.prefix = prefix } }
+    /// Listings under `prefix` get past open(), then block (a dead network mount mid-read).
+    func blockReading(under prefix: String) { state.withLock { $0.reading = prefix } }
     /// Every blocked listing returns; later ones no longer block.
     func release() {
-        state.withLock { $0.paths = []; $0.prefix = nil }
+        state.withLock { $0.paths = []; $0.prefix = nil; $0.reading = nil }
         gate.signal()
     }
     var opened: [String] { state.withLock { $0.opened } }
     func opens(of path: String) -> Int { opened.filter { $0 == path }.count }
 
-    /// A blocked listing blocks inside "open()", before `opened` runs.
-    func read(_ path: String, _ folder: FolderID, _ opened: @escaping @Sendable () -> Void) -> DirectoryListing {
-        let blocked = state.withLock { s in
+    /// A blocked listing blocks inside "open()", before `progress` first runs; a reading one right after.
+    func read(_ path: String, _ folder: FolderID, _ progress: @escaping @Sendable () -> Void) -> DirectoryListing {
+        let (blocked, reading) = state.withLock { s in
             s.opened.append(path)
-            return s.paths.contains(path) || s.prefix.map { path.hasPrefix($0) } == true
+            return (s.paths.contains(path) || s.prefix.map { path.hasPrefix($0) } == true,
+                    s.reading.map { path.hasPrefix($0) } == true)
         }
-        if blocked {
+        if reading { progress() }
+        if blocked || reading {
             gate.wait()
             gate.signal()  // lets the next blocked listing go too
         }
-        return DirectoryLister.read(path, folder, opened)
+        return DirectoryLister.read(path, folder, progress)
     }
 }
 
-private func lister(_ hang: Hang, timeout: Duration = .seconds(5), clock: ManualClock? = nil,
+private func lister(_ hang: Hang, timeout: Duration = .seconds(5), startTimeout: Duration = .seconds(5),
+                    idleTimeout: Duration = .seconds(30), clock: ManualClock? = nil,
                     read: (@Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing)? = nil) -> DirectoryLister {
     let now: @Sendable () -> ContinuousClock.Instant
     if let clock { now = { clock.now } } else { now = { ContinuousClock.now } }
     let reader: @Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing = read ?? { hang.read($0, $1, $2) }
-    return DirectoryLister(timeout: timeout, now: now, read: reader)
+    return DirectoryLister(timeout: timeout, startTimeout: startTimeout, idleTimeout: idleTimeout, now: now, read: reader)
 }
 
 private func opened(_ spec: [String: Int], clock: ManualClock, lister: DirectoryLister) async throws -> (LiveIndex, String, UInt64) {
@@ -127,28 +134,90 @@ private func record(_ live: LiveIndex, _ path: String) async -> FolderRecord {
     try await live.close()
 }
 
-@Test func theWorkerCapHolds() async throws {
+// Fix round 3: a fixed pool of 8 listing threads; one that hangs stays counted.
+@Test func thePoolNeverExceedsEightThreads() async throws {
     let hang = Hang()
     hang.block(under: "/hang/")
-    let folders = lister(hang, timeout: .milliseconds(100))
+    let folders = lister(hang, timeout: .milliseconds(100), startTimeout: .milliseconds(300))
     defer { hang.release() }
-    var outcomes: [String] = []
-    for i in 0..<6 {
-        switch await folders.list(path: "/hang/\(i)", folder: 0) {
-        case .listed: outcomes.append("listed")
-        case .timedOut: outcomes.append("timedOut")
-        case .skipped: outcomes.append("skipped")
+    let outcomes = await withTaskGroup(of: String.self) { group in
+        for i in 0..<20 {
+            group.addTask {
+                switch await folders.list(path: "/hang/\(i)", folder: 0) {
+                case .listed: "listed"
+                case .timedOut: "timedOut"
+                case .skipped: "skipped"
+                }
+            }
         }
+        return await group.reduce(into: [String]()) { $0.append($1) }
     }
-    #expect(outcomes == ["timedOut", "timedOut", "timedOut", "timedOut", "skipped", "skipped"])
-    #expect(hang.opened.count == 4)
-    #expect(folders.abandonedCount == 4)
+    #expect(outcomes.filter { $0 == "timedOut" }.count == 8)
+    #expect(outcomes.filter { $0 == "skipped" }.count == 12)
+    #expect(hang.opened.count == 8)
+    #expect(folders.threadCount == 8)
+    #expect(folders.abandonedCount == 8)
+    // Drained: every listing skips at once.
+    let started = ContinuousClock.now
+    if case .skipped = await folders.list(path: "/elsewhere", folder: 0) {} else { Issue.record("not skipped") }
+    #expect(ContinuousClock.now - started < .milliseconds(100))
 
-    // Once workers return, listing resumes.
+    // Threads that come back serve again.
     hang.release()
     for _ in 0..<100 where folders.abandonedCount > 0 { try await Task.sleep(for: .milliseconds(20)) }
     #expect(folders.abandonedCount == 0)
-    if case .listed = await folders.list(path: "/fresh", folder: 0) {} else { Issue.record("not listed after the cap cleared") }
+    #expect(folders.threadCount <= 8)
+    if case .listed = await folders.list(path: "/fresh", folder: 0) {} else { Issue.record("not listed after the pool drained") }
+}
+
+@Test func aRequestBehindAFullPoolIsSkippedAndTheLockReleased() async throws {
+    let clock = ManualClock()
+    let hang = Hang()
+    let folders = lister(hang, clock: clock)
+    let (live, root, base) = try await opened(["a/f.bin": 10, "b/g.bin": 10], clock: clock, lister: folders)
+    defer { hang.release() }
+    // Eight healthy-looking reads that never finish: every thread is busy, none is hung.
+    hang.blockReading(under: "/busy/")
+    for i in 0..<8 { Task { _ = await folders.list(path: "/busy/\(i)", folder: 0) } }
+    for _ in 0..<100 where hang.opened.filter({ $0.hasPrefix("/busy/") }).count < 8 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let scanned = hang.opens(of: root + "/a")
+    let started = ContinuousClock.now
+    await live.enqueue([change(root + "/a", base + 1)])
+    #expect(ContinuousClock.now - started < .seconds(6.5))
+    #expect(await record(live, "a").flags.contains(.stale))
+    #expect(hang.opens(of: root + "/a") == scanned)
+    // The lock is free again.
+    let read = ContinuousClock.now
+    _ = try await live.read { $0.folders.count }
+    #expect(ContinuousClock.now - read < .seconds(1))
+    try await live.close()
+}
+
+@Test func aReadThatStallsAfterOpenTimesOut() async throws {
+    let hang = Hang()
+    hang.blockReading(under: "/mount/")
+    let folders = lister(hang, idleTimeout: .milliseconds(300))
+    defer { hang.release() }
+    let started = ContinuousClock.now
+    if case .timedOut = await folders.list(path: "/mount/dead", folder: 0) {} else { Issue.record("not timed out") }
+    #expect(ContinuousClock.now - started < .seconds(2))
+    // Skipped like a hung open(), along with what lies under it.
+    if case .skipped = await folders.list(path: "/mount/dead/sub", folder: 0) {} else { Issue.record("not skipped") }
+}
+
+@Test func aWorkerBackAfterItsDeadlineLeavesNoSkip() async throws {
+    let slow = DirectoryLister(timeout: .milliseconds(100), read: { path, folder, progress in
+        usleep(400_000)  // open() returns just after the deadline
+        return DirectoryLister.read(path, folder, progress)
+    })
+    let root = Fixtures.realPath(try Fixtures.tree(["f.bin": 10]))
+    if case .timedOut = await slow.list(path: root, folder: 0) {} else { Issue.record("not timed out") }
+    for _ in 0..<100 where slow.abandonedCount > 0 { try await Task.sleep(for: .milliseconds(20)) }
+    #expect(slow.abandonedCount == 0)
+    #expect(slow.skippedPaths.isEmpty)
 }
 
 @Test func aHangingFolderDoesNotStopTheScan() async throws {
@@ -468,5 +537,18 @@ private func fillCap(_ folders: DirectoryLister, _ hang: Hang) async {
     try await live.setExclusions(["cloud/x"])
     #expect(hang.opens(of: real + "/cloud") == 0)
     #expect(hang.opens(of: "root-listed") == rootListings + 1)
+    try await live.close()
+}
+
+@Test func wrappedEventIDsAreNeverCovered() async throws {
+    let clock = ManualClock()
+    let (live, root, base) = try await opened(["a/f.bin": 10], clock: clock, lister: DirectoryLister())
+    await live.injectCurrentEventID { base + 10 }
+    try await live.apply([lost(root, base + 1)])
+    #expect(await live.stats().fullRescans == 1)
+    // Wrapped IDs say nothing about order: below the coverage or not, it rescans.
+    try await live.apply([FSChange(path: root, id: base + 2, rescanSubtree: false, historyLost: true, idsWrapped: true)])
+    #expect(await live.stats().fullRescans == 2)
+    #expect(FSChange.from(path: "", flags: FSEventStreamEventFlags(kFSEventStreamEventFlagEventIdsWrapped), id: 7)?.idsWrapped == true)
     try await live.close()
 }
