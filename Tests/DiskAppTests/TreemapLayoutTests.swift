@@ -90,3 +90,20 @@ let flat = TreemapOptions(gutter: 0, minSide: 2, headerHeight: 0, cap: 50_000)
     #expect(zout.transform(progress: 0).scale == CGSize(width: 2, height: 2) && zout.transform(progress: 0).offset == CGPoint(x: -800, y: 0))
     #expect(ZoomAnimation.eased(0.5) == 0.875 && ZoomAnimation.duration == 0.2)
 }
+
+/// Counts which folders the layout reads.
+final class CountingSource: TreemapSource {
+    let table: [FolderID: [TreemapItem]]
+    var reads: [FolderID] = []
+    init(_ table: [FolderID: [TreemapItem]]) { self.table = table }
+    func items(in folder: FolderID) -> [TreemapItem] { reads.append(folder); return table[folder] ?? [] }
+}
+
+@Test func spentCapReadsNoMoreFolders() {
+    let src = CountingSource([0: [.init(ref: .folder(1), size: 300), .init(ref: .folder(2), size: 150)],
+                              1: files(Array(repeating: 10, count: 30)), 2: files(Array(repeating: 5, count: 30), from: 100)])
+    let l = TreemapLayout.make(source: src, root: 0, bounds: CGRect(x: 0, y: 0, width: 1000, height: 1000),
+                               options: .init(gutter: 0, minSide: 2, headerHeight: 0, cap: 2))
+    #expect(l.rects.count == 2)
+    #expect(src.reads == [0])
+}

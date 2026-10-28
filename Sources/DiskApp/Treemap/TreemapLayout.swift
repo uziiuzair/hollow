@@ -90,6 +90,8 @@ public struct TreemapLayout: Equatable, Sendable {
         let minArea = Double(options.minSide * options.minSide)
 
         while head < queue.count {
+            // The budget only shrinks: once it is spent, no later folder can add a rect, so read no more.
+            guard rects.count < options.cap else { break }
             let job = queue[head]
             head += 1
             let sorted = source.items(in: job.folder).filter { $0.size > 0 }
