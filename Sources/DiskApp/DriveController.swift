@@ -1,5 +1,6 @@
 import DiskEngine
 import Foundation
+import os
 
 public enum DriveActivity: Equatable, Sendable {
     case idle, opening, scanning, ready, offline
@@ -15,6 +16,8 @@ public final class DriveController: ObservableObject {
     @Published public private(set) var activity: DriveActivity = .idle
     /// Rises by one each time the open index changes, across re-warms.
     @Published public private(set) var generation = 0
+    /// The cleanup lens over the open index. Kept across a cool, so the dropdown still has it.
+    @Published public private(set) var lens: LensReport?
     @Published public var period: Int = 7 {
         didSet {
             guard period != oldValue else { return }
@@ -40,8 +43,17 @@ public final class DriveController: ObservableObject {
     /// Counts the open index's updates into `generation`; lives from open to close.
     private var watching: Task<Void, Never>?
     private(set) var cachedBaseline: (period: Int, day: Day, snapshot: SizeSnapshot?)?
+    /// The lens walk started after the drive turned ready (C25), off the lifecycle chain.
+    private var lensTask: Task<Void, Never>?
+    /// Orders lens walks: only a walk started after the one that set `lens` may replace it.
+    private var lensRequests = 0
+    private var lensApplied = 0
+    private static let log = Logger(subsystem: AppIdentity.bundleID, category: "index")
     /// Tests only: runs between a map build's index read and its unmount check.
     var afterMapRead: (() async -> Void)?
+
+    /// Bytes the lens found that regenerate on their own (nil before the first report).
+    public var clearable: UInt64? { lens?.total(.regenerates) }
 
     public var hasJournal: Bool { EventWatcher.journalUUID(device: volume.device) != nil }
 
@@ -56,14 +68,14 @@ public final class DriveController: ObservableObject {
         FileManager.default.fileExists(atPath: store.appending(path: "index.snapshot").path)
     }
 
-    private func run(_ body: @escaping @MainActor () async -> Void) async {
+    private func run<R: Sendable>(_ body: @escaping @MainActor () async -> R) async -> R {
         let previous = lifecycle
         let task = Task { @MainActor in
             await previous?.value
-            await body()
+            return await body()
         }
-        lifecycle = task
-        await task.value
+        lifecycle = Task { _ = await task.value }
+        return await task.value
     }
 
     public func warm() async {
@@ -139,6 +151,64 @@ public final class DriveController: ObservableObject {
         guard !unmounting else { return }
         activity = .ready
         restartTimer()
+        // Its own task, so the walk (it holds the index lock) never delays `.ready` or the first map build.
+        lensTask = Task { await self.refreshLens() }
+    }
+
+    /// Tests only: waits for the lens walk started by the last warm.
+    func lensSettled() async { await lensTask?.value }
+
+    private func refreshLens(force: Bool = false) async {
+        guard let index, force || lens?.generation != generation else { return }
+        let gen = generation
+        lensRequests += 1
+        let request = lensRequests
+        let start = ContinuousClock.now
+        guard let report = try? await index.read({ LensMatcher.report(index: $0, rules: .bundled, generation: gen) }) else { return }
+        let ms = (ContinuousClock.now - start) / .milliseconds(1)
+        Self.log.info("lens report: \(report.hits.count) hits in \(Int(ms)) ms")
+        guard request > lensApplied else { return }
+        lensApplied = request
+        lens = report
+    }
+
+    /// Moves `items` (the ones checked in the review sheet) to the Trash, then relists their folders and recounts at once.
+    /// Runs on the lifecycle chain, so it never races a cool or an unmount; a drive that is unmounting or cold moves nothing.
+    public func trash(_ items: [BasketItem], backend: some TrashBackend) async -> TrashOutcome {
+        await run { await self.trashBody(items, backend: backend) }
+    }
+
+    private func trashBody(_ items: [BasketItem], backend: some TrashBackend) async -> TrashOutcome {
+        let protected = lens?.hits.filter { $0.safety == .appManaged } ?? []
+        guard !unmounting, let index else { return .driveGone(items, protected: protected) }
+        // The realpath'd root the index was opened with (C7).
+        guard let root = try? await index.read({ $0.rootPath }) else { return .driveGone(items, protected: protected) }
+        let outcome = await Trasher.moveToTrash(items, root: root, protected: protected, expectedDevice: volume.device,
+                                                backend: backend)
+        guard !outcome.cleared.isEmpty else { return outcome }
+        var userTrash: String?
+        if volume.isInternalData {
+            // On the Data volume the items land in the user's Trash; relist it too when it is indexed (C8).
+            let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
+            let trash = String(TrashPath.trimmed(home).drop { $0 == "/" }) + "/.Trash"
+            if (try? await index.read({ $0.folder(atRelativePath: trash) })) != nil { userTrash = trash }
+        }
+        let changes = Self.foldersToRelist(cleared: outcome.cleared, userTrash: userTrash).map {
+            FSChange(path: $0.isEmpty ? root : TrashPath.physicalPath(root: root, relative: $0), id: 0,
+                     rescanSubtree: false, historyLost: false)
+        }
+        try? await index.apply(changes)
+        await refresh()
+        await refreshLens(force: true)
+        return outcome
+    }
+
+    /// Each distinct parent of the cleared paths ("" for the root), then `userTrash` when given, sorted.
+    nonisolated static func foldersToRelist(cleared: Set<String>, userTrash: String?) -> [String] {
+        guard !cleared.isEmpty else { return [] }
+        var folders = Set(cleared.map { path in path.lastIndex(of: "/").map { String(path[..<$0]) } ?? "" })
+        if let userTrash { folders.insert(userTrash) }
+        return folders.sorted()
     }
 
     private func coolBody() async {

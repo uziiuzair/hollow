@@ -50,13 +50,15 @@ public struct DropdownModel: Equatable, Sendable {
     public var footerRight: FooterAction
     /// The drive is connected, so "Open map" works.
     public var canOpenMap: Bool
+    /// "Review N GB to clear": shown while the drive is connected and the lens found at least 0.1 GB that regenerates.
+    public var reviewTitle: String?
 
     private static let barOrder: [ContentKind] = [.appData, .virtualMachines, .developer, .media, .apps, .documents, .caches, .other]
     private static let minus = "\u{2212}"
 
     public static func make(drives: [KnownDrive], selected: String, connected: Set<String>, summary: DriveSummary?,
                             space: VolumeSpace?, activity: DriveActivity, period: Int, connectedSince: Date?,
-                            now: Date) -> DropdownModel {
+                            now: Date, clearable: UInt64? = nil) -> DropdownModel {
         let tabs = tabList(drives, selected: selected, connected: connected)
         let drive = drives.first { $0.uuid == selected }
         let isInternal = drive?.tintIndex == 0
@@ -104,7 +106,8 @@ public struct DropdownModel: Equatable, Sendable {
                              showsReclaimable: showsReclaimable, rows: rows, netLabel: netLabel, netValue: netValue,
                              netIsGrowth: netIsGrowth, emptyMessage: empty, footerLeft: footerLeft,
                              footerRight: !isOnline ? .none : (isInternal ? .settings : .eject),
-                             canOpenMap: isOnline)
+                             canOpenMap: isOnline,
+                             reviewTitle: clearable.flatMap { isOnline && $0 >= 100_000_000 ? "Review " + Format.gb($0) + " to clear" : nil })
     }
 
     private static func tabList(_ drives: [KnownDrive], selected: String, connected: Set<String>) -> [Tab] {

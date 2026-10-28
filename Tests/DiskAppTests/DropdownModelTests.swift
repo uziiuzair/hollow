@@ -67,4 +67,16 @@ import DiskEngine
             space: Fixtures.space(totalGB: 994, freeGB: 82, reclaimableGB: 0), activity: .ready, period: 1, connectedSince: nil, now: .now)
         #expect(m.rows.first?.opensMap == false)
     }
+
+    @Test func reviewButtonShowsClearableSpace() {
+        func title(_ clearable: UInt64?, connected: Set<String> = ["I"]) -> String? {
+            DropdownModel.make(drives: [Fixtures.internalDrive], selected: "I", connected: connected, summary: nil,
+                               space: Fixtures.space(totalGB: 1000, freeGB: 82, reclaimableGB: 0), activity: .ready, period: 7,
+                               connectedSince: nil, now: .now, clearable: clearable).reviewTitle
+        }
+        #expect(title(6_200_000_000) == "Review 6.2 GB to clear")
+        #expect(title(100_000_000) == "Review 0.1 GB to clear")
+        #expect(title(99_999_999) == nil && title(50_000_000) == nil && title(nil) == nil)
+        #expect(title(6_200_000_000, connected: []) == nil)
+    }
 }

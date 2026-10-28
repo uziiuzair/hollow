@@ -224,3 +224,61 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
     #expect(cached.period == 7 && cached.snapshot == nil)
     c.release(); await c.cool()
 }
+
+// The lens report is built after the drive is ready (its own task) and outlives a cool.
+@MainActor @Test func lensReportFollowsTheIndex() async throws {
+    let root = try Fixtures.tree(["Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000, "Users/u/Documents/d.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.warm()
+    #expect(c.activity == .ready)
+    await c.lensSettled()
+    #expect(c.lens?.hits.map(\.ruleID) == ["xcode-derived-data"])
+    #expect(c.clearable == Fixtures.allocatedSize(root.appending(path: "Users/u/Library/Developer/Xcode/DerivedData/App/x.bin")))
+    await c.cool()
+    #expect(c.lens != nil)
+}
+
+@MainActor @Test func trashMovesUpdatesAndRecounts() async throws {
+    let root = try Fixtures.tree(["Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000, "Users/u/Documents/d.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.warm()
+    await c.lensSettled()
+    let before = try #require(c.summary?.scannedBytes)
+    let out = await c.trash(c.lens!.hits.map(BasketItem.from(hit:)), backend: FixtureTrash(bin: try Fixtures.tempDir()))
+    #expect(out.moved == ["Users/u/Library/Developer/Xcode/DerivedData"])
+    #expect(!FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Library/Developer/Xcode/DerivedData").path))
+    #expect(c.summary?.scannedBytes == before - out.freed)
+    #expect(c.clearable == 0)
+    await c.cool()
+}
+
+@MainActor @Test func trashAfterUnmountTouchesNothing() async throws {
+    let root = try Fixtures.tree(["Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.warm()
+    await c.lensSettled()
+    let items = c.lens!.hits.map(BasketItem.from(hit:))
+    await c.willUnmount()
+    let out = await c.trash(items, backend: FixtureTrash(bin: try Fixtures.tempDir()))
+    #expect(out.moved.isEmpty && out.failures.map(\.reason) == [.driveGone])
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Library/Developer/Xcode/DerivedData/App/x.bin").path))
+}
+
+// A cold drive (never warmed, no open index) moves nothing either.
+@MainActor @Test func trashOnColdDriveTouchesNothing() async throws {
+    let root = try Fixtures.tree(["Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    let item = BasketItem(path: "Users/u/Library/Developer/Xcode/DerivedData", name: "DerivedData", size: 3_000_000,
+                          kind: nil, isFolder: true, ruleID: "xcode-derived-data", safety: .regenerates)
+    let out = await c.trash([item], backend: FixtureTrash(bin: try Fixtures.tempDir()))
+    #expect(out.moved.isEmpty && out.failures.map(\.reason) == [.driveGone])
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Library/Developer/Xcode/DerivedData/App/x.bin").path))
+}
+
+// The folders to relist after a move: each distinct parent (the root as ""), plus the user's Trash when given (C8).
+@Test func trashRelistsEachParentOnce() {
+    let parents = DriveController.foldersToRelist(cleared: ["a/x", "a/y", "top", "b/c/d"], userTrash: nil)
+    #expect(parents == ["", "a", "b/c"])
+    #expect(DriveController.foldersToRelist(cleared: ["Users/u/x"], userTrash: "Users/u/.Trash") == ["Users/u", "Users/u/.Trash"])
+    #expect(DriveController.foldersToRelist(cleared: [], userTrash: "Users/u/.Trash").isEmpty)
+}
