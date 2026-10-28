@@ -28,6 +28,10 @@ public struct DropdownModel: Equatable, Sendable {
         public var location: String
         public var delta: String
         public var isGrowth: Bool
+        /// The change's path relative to the drive root.
+        public var path: String
+        /// True when a click can open the map there: the drive is connected and the path is not the root.
+        public var opensMap: Bool
     }
 
     public var tabs: [Tab]
@@ -44,6 +48,8 @@ public struct DropdownModel: Equatable, Sendable {
     public var emptyMessage: String?
     public var footerLeft: String
     public var footerRight: FooterAction
+    /// The drive is connected, so "Open map" works.
+    public var canOpenMap: Bool
 
     private static let barOrder: [ContentKind] = [.appData, .virtualMachines, .developer, .media, .apps, .documents, .caches, .other]
     private static let minus = "\u{2212}"
@@ -57,8 +63,13 @@ public struct DropdownModel: Equatable, Sendable {
         let isOnline = connected.contains(selected)
 
         let (title, detail) = freeText(drive: drive, space: space, isOnline: isOnline)
-        let (bar, legend, showsReclaimable) = isOnline ? barParts(summary: summary, space: space) : ([], [], false)
-        let rows = isOnline ? summary.map(makeRows) ?? [] : []
+        // An offline drive keeps its last bar: the cached kinds plus the space the registry remembers.
+        let barSpace: VolumeSpace? = isOnline ? space : drive.flatMap { d in
+            guard let total = d.lastTotal, let free = d.lastFree else { return nil }
+            return VolumeSpace(total: total, available: free, availableForImportantUsage: free)
+        }
+        let (bar, legend, showsReclaimable) = (isOnline || summary != nil) ? barParts(summary: summary, space: barSpace) : ([], [], false)
+        let rows = summary.map { makeRows($0, opensMap: isOnline) } ?? []
 
         let netLabel = period == 1 ? "Net today" : period == 7 ? "Net this week" : "Net this month"
         var netValue = ""
@@ -71,7 +82,10 @@ public struct DropdownModel: Equatable, Sendable {
         }
 
         var empty: String?
-        if isOnline {
+        if !isOnline {
+            if let summary { if rows.isEmpty, summary.changes.isEmpty { empty = "Nothing changed by more than 0.1 GB." } }
+            else { empty = "Nothing saved for this drive yet." }
+        } else {
             if summary == nil, activity == .scanning {
                 empty = "Scanning this drive for the first time. Free space is already up to date."
             } else if let summary {
@@ -81,7 +95,7 @@ public struct DropdownModel: Equatable, Sendable {
         }
 
         let footerLeft: String
-        if !isOnline { footerLeft = "Offline" }
+        if !isOnline { footerLeft = summary.map { "Data from " + Format.shortDate($0.updatedAt) } ?? "Offline" }
         else if activity == .opening || activity == .scanning { footerLeft = "Updating\u{2026}" }
         else if isInternal { footerLeft = summary.map { "Updated " + Format.ago($0.updatedAt, now: now) } ?? "Updating\u{2026}" }
         else { footerLeft = connectedSince.map { "Connected " + Format.ago($0, now: now) } ?? "Connected" }
@@ -89,7 +103,8 @@ public struct DropdownModel: Equatable, Sendable {
         return DropdownModel(tabs: tabs, freeTitle: title, freeDetail: detail, bar: bar, legend: legend,
                              showsReclaimable: showsReclaimable, rows: rows, netLabel: netLabel, netValue: netValue,
                              netIsGrowth: netIsGrowth, emptyMessage: empty, footerLeft: footerLeft,
-                             footerRight: !isOnline ? .none : (isInternal ? .settings : .eject))
+                             footerRight: !isOnline ? .none : (isInternal ? .settings : .eject),
+                             canOpenMap: isOnline)
     }
 
     private static func tabList(_ drives: [KnownDrive], selected: String, connected: Set<String>) -> [Tab] {
@@ -136,7 +151,7 @@ public struct DropdownModel: Equatable, Sendable {
         return (segments.map { BarSegment(kind: $0.0, fraction: Double($0.1) / sum) }, legend, reclaimable > 0)
     }
 
-    private static func makeRows(_ summary: DriveSummary) -> [Row] {
+    private static func makeRows(_ summary: DriveSummary, opensMap: Bool) -> [Row] {
         summary.changes.prefix(5).map { change in
             let parts = change.path.split(separator: "/").map(String.init)
             var kind = ContentKind.other
@@ -145,7 +160,8 @@ public struct DropdownModel: Equatable, Sendable {
             }
             return Row(kind: kind, name: parts.last ?? change.path,
                        location: parts.count >= 2 ? parts[parts.count - 2] : "",
-                       delta: Format.signedGB(change.delta), isGrowth: change.delta > 0)
+                       delta: Format.signedGB(change.delta), isGrowth: change.delta > 0,
+                       path: change.path, opensMap: opensMap && !change.path.isEmpty)
         }
     }
 }

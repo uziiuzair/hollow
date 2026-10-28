@@ -11,7 +11,9 @@ import DiskEngine
             space: Fixtures.space(totalGB: 994, freeGB: 82, reclaimableGB: 61), activity: .ready, period: 1, connectedSince: nil, now: .now)
         #expect(m.freeTitle == "82 GB free")
         #expect(m.freeDetail == "of 994 GB, 61 GB more reclaimable")
-        #expect(m.rows.first == .init(kind: .virtualMachines, name: "Docker.raw", location: "Data", delta: "+8.1 GB", isGrowth: true))
+        #expect(m.rows.first == .init(kind: .virtualMachines, name: "Docker.raw", location: "Data", delta: "+8.1 GB", isGrowth: true,
+                              path: "Users/u/Library/Containers/com.docker.docker/Data/Docker.raw", opensMap: true))
+        #expect(m.canOpenMap)
         #expect(m.rows.last?.delta == "\u{2212}0.6 GB")
         #expect(m.netLabel == "Net today" && m.netValue == "\u{2212}14.2 GB free")
         #expect(abs(m.bar.map(\.fraction).reduce(0, +) - 1) < 0.001)
@@ -40,5 +42,29 @@ import DiskEngine
         let m = DropdownModel.make(drives: [Fixtures.internalDrive], selected: "I", connected: ["I"], summary: Fixtures.summary(net: nil, changes: []),
             space: Fixtures.space(totalGB: 994, freeGB: 82, reclaimableGB: 0), activity: .ready, period: 1, connectedSince: nil, now: .now)
         #expect(m.emptyMessage == "No history yet. Changes show up from tomorrow.")
+    }
+    @Test func offlineShowsLastData() {
+        let seen = Date(timeIntervalSince1970: 1_792_500_000)
+        let cached = DriveSummary(scannedBytes: 600_000_000_000, kinds: [.media: 600_000_000_000],
+                                  changes: [.init(path: "Footage/2026", delta: 74_000_000_000)], net: 74_000_000_000, period: 7, updatedAt: seen)
+        let m = DropdownModel.make(drives: [Fixtures.internalDrive, Fixtures.t7(lastSeen: seen, lastFreeGB: 212)], selected: "T7", connected: ["I"],
+            summary: cached, space: nil, activity: .offline, period: 7, connectedSince: nil, now: seen.addingTimeInterval(86_400 * 8))
+        #expect(m.freeTitle == "Not connected")
+        #expect(m.bar.map(\.kind) == [.content(.media), .content(.other), .free])
+        #expect(zip(m.bar.map(\.fraction), [0.6, 0.188, 0.212]).allSatisfy { abs($0 - $1) < 0.001 })
+        #expect(m.rows == [.init(kind: .other, name: "2026", location: "Footage", delta: "+74 GB", isGrowth: true, path: "Footage/2026", opensMap: false)])
+        #expect(m.footerLeft == "Data from \(Format.shortDate(seen))")
+        #expect(!m.canOpenMap && m.emptyMessage == nil)
+    }
+    @Test func offlineWithoutDataSaysSo() {
+        let m = DropdownModel.make(drives: [Fixtures.internalDrive, Fixtures.t7(lastSeen: .now)], selected: "T7", connected: ["I"],
+            summary: nil, space: nil, activity: .offline, period: 7, connectedSince: nil, now: .now)
+        #expect(m.emptyMessage == "Nothing saved for this drive yet." && m.rows.isEmpty && m.footerLeft == "Offline")
+    }
+    @Test func rootChangeDoesNotOpenMap() {
+        let m = DropdownModel.make(drives: [Fixtures.internalDrive], selected: "I", connected: ["I"],
+            summary: Fixtures.summary(net: 1, changes: [.init(path: "", delta: 5_000_000_000)]),
+            space: Fixtures.space(totalGB: 994, freeGB: 82, reclaimableGB: 0), activity: .ready, period: 1, connectedSince: nil, now: .now)
+        #expect(m.rows.first?.opensMap == false)
     }
 }

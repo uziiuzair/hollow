@@ -20,9 +20,11 @@ struct DropdownHost: View {
     let select: (String) -> Void
     let setPeriod: (Int) -> Void
     let eject: () -> Void
+    /// nil opens the drive root; a path opens at that item's parent with it selected.
+    let openMap: (String?) -> Void
 
     var body: some View {
-        DropdownView(model: state.model, period: state.period, select: select, setPeriod: setPeriod, eject: eject)
+        DropdownView(model: state.model, period: state.period, select: select, setPeriod: setPeriod, eject: eject, openMap: openMap)
     }
 }
 
@@ -50,6 +52,7 @@ struct DropdownView: View {
     let select: (String) -> Void
     let setPeriod: (Int) -> Void
     let eject: () -> Void
+    let openMap: (String?) -> Void
 
     private var isOffline: Bool { model.tabs.first(where: \.isSelected)?.isOffline ?? false }
 
@@ -57,7 +60,8 @@ struct DropdownView: View {
         VStack(spacing: 0) {
             tabs
             freeSection
-            if !isOffline { changedSection }
+            changedSection
+            actions
             footer
         }
         .font(.system(size: 13))
@@ -241,7 +245,16 @@ struct DropdownView: View {
         .background(Tokens.chip, in: RoundedRectangle(cornerRadius: 6))
     }
 
-    private func rowView(_ row: DropdownModel.Row) -> some View {
+    @ViewBuilder private func rowView(_ row: DropdownModel.Row) -> some View {
+        if row.opensMap {
+            Button { openMap(row.path) } label: { rowContent(row) }
+                .buttonStyle(RowButtonStyle())
+        } else {
+            rowContent(row).opacity(isOffline ? 0.55 : 1)
+        }
+    }
+
+    private func rowContent(_ row: DropdownModel.Row) -> some View {
         HStack(spacing: 10) {
             RoundedRectangle(cornerRadius: 2).fill(Palette.color(row.kind)).frame(width: 8, height: 8)
             (Text(row.name)
@@ -252,6 +265,23 @@ struct DropdownView: View {
                 .foregroundStyle(row.isGrowth ? Palette.growth : Palette.freed)
         }
         .padding(.vertical, 6)
+        .contentShape(Rectangle())
+    }
+
+    // MARK: Actions
+
+    private var actions: some View {
+        Button { openMap(nil) } label: {
+            Text("Open map")
+                .fontWeight(.medium)
+                .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30)
+                .background(Tokens.chip, in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .disabled(!model.canOpenMap)
+        .opacity(model.canOpenMap ? 1 : 0.4)
+        .padding(.horizontal, 14).padding(.bottom, 12)
     }
 
     // MARK: Footer
@@ -269,6 +299,26 @@ struct DropdownView: View {
         .font(.system(size: 11.5)).foregroundStyle(Tokens.fg2)
         .padding(.horizontal, 14).padding(.vertical, 8)
         .overlay(alignment: .top) { divider() }
+    }
+}
+
+/// A plain row button whose background turns chip-colored under the pointer.
+private struct RowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Hover(label: configuration.label, pressed: configuration.isPressed)
+    }
+
+    private struct Hover: View {
+        let label: ButtonStyleConfiguration.Label
+        let pressed: Bool
+        @State private var hovering = false
+        var body: some View {
+            label
+                .padding(.horizontal, 6)
+                .background(hovering || pressed ? Tokens.chip : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .padding(.horizontal, -6)
+                .onHover { hovering = $0 }
+        }
     }
 }
 

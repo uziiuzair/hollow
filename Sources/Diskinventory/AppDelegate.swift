@@ -40,6 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastDismiss = Date.distantPast
     private var clickMonitor: Any?
     private var mapWindow: MapWindowController?
+    /// Last saved summaries of drives that are not connected, read once per uuid and period.
+    private var cachedSummaries: [String: [Int: DriveSummary?]] = [:]
     #if DEBUG
     private var debugSnapshotDir: URL?
     #endif
@@ -206,6 +208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let task = Task { [weak self] in
             await c.willUnmount()
             guard let self else { return }
+            // willUnmount saves the index; whatever was cached before is stale.
+            self.cachedSummaries[uuid] = nil
             if self.unmounts[uuid] != nil { self.unmountFinished[uuid] = Date() }
             self.rebuild()
         }
@@ -285,15 +289,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let connected = Set(controllers.keys.filter { unmounts[$0] == nil })
         let c = liveController
         if let c, c.space == nil { Task { await c.refreshSpace() } }
+        let period = c?.period ?? offlinePeriod
+        let summary = c?.summary ?? (connected.contains(selected) ? nil : cachedSummary(selected, period: period))
         let model = DropdownModel.make(
-            drives: registry.all(), selected: selected, connected: connected, summary: c?.summary,
-            space: c?.space, activity: c?.activity ?? .offline, period: c?.period ?? 7,
+            drives: registry.all(), selected: selected, connected: connected, summary: summary,
+            space: c?.space, activity: c?.activity ?? .offline, period: period,
             connectedSince: connectedSince[selected], now: .now)
         if state.model != model { state.model = model }
-        let period = c?.period ?? 7
         if state.period != period { state.period = period }
         // A new controller for the same UUID (remount, failed eject) needs a fresh subscription.
         if observedController !== c { observeSelected() }
+    }
+
+    /// Offline drives have no controller to hold the period, so the panel keeps it.
+    private var offlinePeriod = 7
+
+    private func cachedSummary(_ uuid: String, period: Int) -> DriveSummary? {
+        if let hit = cachedSummaries[uuid]?[period] { return hit }
+        let loaded = DriveSummary.load(from: LiveIndex.storeDirectory(base: storeBase, uuid: uuid), period: period)
+        cachedSummaries[uuid, default: [:]][period] = .some(loaded)
+        return loaded
     }
 
     private func selectDrive(_ uuid: String) {
@@ -307,7 +322,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setPeriod(_ days: Int) {
-        guard let c = liveController else { rebuild(); return }
+        guard let c = liveController else { offlinePeriod = days; rebuild(); return }
+        offlinePeriod = days
         c.period = days
         // Reopens the index if the panel stayed open past the cool-down, so the new
         // period is not shown from a stale cache.
@@ -337,7 +353,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state: state,
             select: { [weak self] in self?.selectDrive($0) },
             setPeriod: { [weak self] in self?.setPeriod($0) },
-            eject: { [weak self] in self?.ejectSelected() })
+            eject: { [weak self] in self?.ejectSelected() },
+            openMap: { [weak self] focus in
+                guard let self else { return }
+                self.panel?.dismiss()
+                self.openMap(uuid: self.selected, focus: focus)
+            })
         let p = DropdownPanel(rootView: host)
         p.onDismiss = { [weak self] in self?.panelDismissed() }
         return p
