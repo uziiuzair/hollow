@@ -82,6 +82,13 @@ public struct NamePool: Sendable {
         return String(decoding: Array(head) + Array(tail), as: UTF8.self)
     }
 
+    /// The name at `offset`, as its stored bytes.
+    public func bytes(at offset: UInt32) -> [UInt8] {
+        let start = Int(offset)
+        let length = Int(byte(at: start)) | Int(byte(at: start + 1)) << 8
+        return (0..<length).map { byte(at: start + 2 + $0) }
+    }
+
     /// Whether the name at `offset` is exactly `bytes`, read in place without building a String.
     public func hasBytes(at offset: UInt32, _ bytes: [UInt8]) -> Bool {
         let start = Int(offset)

@@ -106,3 +106,63 @@ import Testing
     #expect(idx.folder(atRelativePath: "new") == nil)
     #expect(idx.childLookupTables == 0)
 }
+
+/// A root with `count` subfolders `<prefix>0`… under folder 0, or under `parent` once listed.
+private func bigFolder(_ idx: ScanIndex, _ prefix: String, _ count: Int, under parent: FolderID = 0) throws {
+    let entries = (0..<count).map { RawEntry.dir("\(prefix)\($0)") }
+    _ = try idx.integrate(DirectoryListing(folder: parent, outcome: .ok, entries: entries), rootDevice: 1)
+}
+
+// Fix round 1 (I1): a folder over the table cap is counted once, not rebuilt on every lookup, until its children change.
+@Test func aFolderTooBigToTableIsCountedOnce() throws {
+    let idx = try ScanIndex(rootName: "r", storage: try Fixtures.tempDir())
+    idx.rootDevice = 1
+    idx.tableAbove = 10
+    idx.tableLimit = 100
+    try bigFolder(idx, "d", 300)
+    #expect(idx.folder(atRelativePath: "nope") == nil)
+    #expect(idx.folder(atRelativePath: "d299") != nil)
+    #expect(idx.folder(atRelativePath: "nope") == nil)
+    #expect(idx.childTablePasses == 1)
+    #expect(idx.childLookupTables == 0)
+    // Its children change: it is counted again.
+    _ = try idx.relist(DirectoryListing(folder: 0, outcome: .ok, entries: (0..<5).map { .dir("d\($0)") }))
+    _ = try idx.relist(DirectoryListing(folder: 0, outcome: .ok, entries: (0..<300).map { .dir("d\($0)") }))
+    #expect(idx.folder(atRelativePath: "nope") == nil)
+    #expect(idx.childTablePasses == 2)
+}
+
+// Fix round 1 (I1): past the cap, the oldest table goes, not all of them.
+@Test func aNewTableEvictsOnlyTheOldest() throws {
+    let idx = try ScanIndex(rootName: "r", storage: try Fixtures.tempDir())
+    idx.rootDevice = 1
+    idx.tableAbove = 10
+    idx.tableLimit = 100
+    try bigFolder(idx, "f", 3)
+    for (i, name) in ["f0", "f1", "f2"].enumerated() {
+        try bigFolder(idx, "\(name)-", 40, under: try #require(idx.folder(atRelativePath: name)))
+        #expect(idx.folder(atRelativePath: "\(name)/missing") == nil)
+        #expect(idx.childLookupTables == min(i + 1, 2))
+    }
+    // f0's table went; f1's and f2's are still there, so lookups in them build nothing.
+    let passes = idx.childTablePasses
+    #expect(idx.folder(atRelativePath: "f1/f1-39") != nil && idx.folder(atRelativePath: "f2/f2-39") != nil)
+    #expect(idx.childTablePasses == passes)
+}
+
+// Fix round 1 (M3): an ASCII name is matched on bytes, a non-ASCII one as a String, whether or not the folder is tabled.
+@Test func lookupsMeanTheSameTabledOrNot() throws {
+    let idx = try ScanIndex(rootName: "r", storage: try Fixtures.tempDir())
+    idx.rootDevice = 1
+    idx.tableAbove = 10
+    var entries = (0..<50).map { RawEntry.dir("d\($0)") }
+    entries += [.dir("\u{212A}"), .dir("caf\u{E9}")]
+    _ = try idx.integrate(DirectoryListing(folder: 0, outcome: .ok, entries: entries), rootDevice: 1)
+    func probe() -> [FolderID?] {
+        ["K", "\u{212A}", "cafe\u{301}", "caf\u{E9}", "d49"].map { idx.folder(atRelativePath: $0) }
+    }
+    let before = probe()
+    #expect(idx.childLookupTables == 1)
+    #expect(probe() == before)
+    #expect(before[0] == nil && before[1] != nil && before[2] == before[3] && before[3] != nil && before[4] != nil)
+}

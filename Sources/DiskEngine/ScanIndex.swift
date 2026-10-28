@@ -7,7 +7,8 @@ public func shouldDescend(entryDevice: Int32, rootDevice: Int32, isMountPoint: B
 }
 
 /// All scan results. Folders live in RAM; stored files live in `files` on disk.
-/// Only one caller may mutate it at a time (the scanner's collector loop).
+/// Not thread-safe, lookups included: `folder(atRelativePath:)` and `deepestFolder` keep tables of big folders'
+/// children. Every access stays with its one owner at a time (the `LiveIndex` actor, or the scanner's collector loop).
 public final class ScanIndex {
     public static let bigFileThreshold: UInt64 = 1_048_576
 
@@ -41,12 +42,18 @@ public final class ScanIndex {
     }
     /// `exclusions` as parent relative path -> excluded child names.
     private var excludedChildren: [String: Set<String>] = [:]
-    /// Big folders' subfolders by name, built when a lookup passes many and dropped whenever its children change, so a
-    /// temp folder with 20,000 entries isn't passed over for every event under it. At most `maxTabled` names in all.
-    private var childTables: [FolderID: [String: FolderID]] = [:]
+    /// Big folders' subfolders by their names' bytes, built when an ASCII lookup passes more than `tableAbove` of them
+    /// and dropped whenever the folder's children change, so a temp folder with 20,000 entries isn't passed over for
+    /// every event under it. At most `tableLimit` names in all; past that the oldest table goes.
+    private var childTables: [FolderID: (names: [[UInt8]: FolderID], built: Int)] = [:]
     private var tabledNames = 0
-    static let tableAbove = 1024
-    static let maxTabled = 65_536
+    private var tablesBuilt = 0
+    /// Folders with more than `tableLimit` subfolders: never tabled, and not counted again until their children change.
+    private var untableable: Set<FolderID> = []
+    var tableAbove = 1024
+    var tableLimit = 65_536
+    /// Tests only: passes made over a folder's subfolders to table them.
+    private(set) var childTablePasses = 0
     /// Tests only.
     var childLookupTables: Int { childTables.count }
     /// Folders marked `.stale` since the owner last took them, to list again later.
@@ -263,54 +270,66 @@ public final class ScanIndex {
         return (current, true)
     }
 
-    /// `folder`'s subfolder named `name`, or nil. An ASCII name is matched on its bytes, read in place: a lookup passes
-    /// over every sibling, and event paths and listings both carry a name's own bytes. Any other name is compared as
-    /// String comparison has it, so its NFC and NFD spellings agree.
+    /// `folder`'s subfolder named `name`, or nil. An ASCII name is matched on its bytes, in a table or read in place:
+    /// event paths and listings both carry a name's own bytes, so "K" never finds a Kelvin sign. Any other name is
+    /// compared as String comparison has it, so its NFC and NFD spellings agree; it is never tabled. Either way the
+    /// answer doesn't depend on whether the folder is tabled.
     private func child(named name: Substring, of folder: FolderID) -> FolderID? {
-        if let table = childTables[folder] { return table[String(name)] }
         var child = folders[Int(folder)].firstChildFolder
-        var passed = 0
-        if name.utf8.allSatisfy({ $0 < 0x80 }) {
-            let bytes = Array(name.utf8)
-            while child != noFolder, !folderNames.hasBytes(at: folders[Int(child)].nameOffset, bytes) {
-                child = folders[Int(child)].nextSibling
-                passed += 1
-            }
-        } else {
+        guard name.utf8.allSatisfy({ $0 < 0x80 }) else {
             while child != noFolder, folderName(child) != name {
                 child = folders[Int(child)].nextSibling
-                passed += 1
             }
+            return child == noFolder ? nil : child
         }
-        if passed > Self.tableAbove { tableChildren(of: folder) }
+        let bytes = Array(name.utf8)
+        if let table = childTables[folder] { return table.names[bytes] }
+        var passed = 0
+        while child != noFolder, !folderNames.hasBytes(at: folders[Int(child)].nameOffset, bytes) {
+            child = folders[Int(child)].nextSibling
+            passed += 1
+        }
+        if passed > tableAbove, !untableable.contains(folder) { tableChildren(of: folder) }
         return child == noFolder ? nil : child
     }
 
     /// After a lookup passed more than `tableAbove` of a folder's subfolders: its subfolders by name. The first of two
     /// equal names wins, as in a pass over the siblings.
     private func tableChildren(of folder: FolderID) {
-        var table: [String: FolderID] = [:]
+        childTablePasses += 1
+        // Counted first, without building a name: a folder over the limit is remembered and left untabled.
+        var count = 0
         var child = folders[Int(folder)].firstChildFolder
-        while child != noFolder {
-            let name = folderName(child)
-            if table[name] == nil { table[name] = child }
+        while child != noFolder, count <= tableLimit {
+            count += 1
             child = folders[Int(child)].nextSibling
         }
-        guard table.count <= Self.maxTabled else { return }
-        if tabledNames + table.count > Self.maxTabled { dropChildTables() }
-        childTables[folder] = table
-        tabledNames += table.count
+        guard count <= tableLimit else {
+            untableable.insert(folder)
+            return
+        }
+        while tabledNames + count > tableLimit,
+              let oldest = childTables.min(by: { $0.value.built < $1.value.built })?.key {
+            untable(oldest)
+        }
+        var names: [[UInt8]: FolderID] = [:]
+        names.reserveCapacity(count)
+        child = folders[Int(folder)].firstChildFolder
+        while child != noFolder {
+            let bytes = folderNames.bytes(at: folders[Int(child)].nameOffset)
+            if names[bytes] == nil { names[bytes] = child }
+            child = folders[Int(child)].nextSibling
+        }
+        tablesBuilt += 1
+        childTables[folder] = (names, tablesBuilt)
+        tabledNames += names.count
     }
 
-    /// `folder`'s children changed (or it became garbage): its table, if any, goes.
+    /// `folder`'s children changed (or it became garbage): its table, if any, goes, and it may be counted again.
     private func untable(_ folder: FolderID) {
-        guard !childTables.isEmpty else { return }
-        if let table = childTables.removeValue(forKey: folder) { tabledNames -= table.count }
-    }
-
-    private func dropChildTables() {
-        childTables = [:]
-        tabledNames = 0
+        guard !childTables.isEmpty || !untableable.isEmpty else { return }
+        if let table = childTables.removeValue(forKey: folder) { tabledNames -= table.names.count }
+        untableable.remove(folder)
     }
 
     /// The folder's path relative to the root ("" for the root).
