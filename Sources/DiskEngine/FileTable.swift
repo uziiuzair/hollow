@@ -6,6 +6,8 @@ public final class FileTable {
     private let records: MappedAppendFile
     private let names: MappedAppendFile
     public private(set) var count = 0
+    /// How many records have been read; lets tests see which code paths touch the table.
+    private(set) var recordReads = 0
 
     public init(directory: URL) throws {
         records = try MappedAppendFile(url: directory.appending(path: "files.bin"))
@@ -48,7 +50,8 @@ public final class FileTable {
     }
 
     public func record(_ i: FileIndex) throws -> FileRecord {
-        try records.withMappedBytes {
+        recordReads += 1
+        return try records.withMappedBytes {
             $0.loadUnaligned(fromByteOffset: Int(i) * MemoryLayout<FileRecord>.stride, as: FileRecord.self)
         }
     }

@@ -35,6 +35,9 @@ public actor LiveIndex {
     private var fault: (@Sendable () throws -> Void)?
     private var beforeScan: (@Sendable () -> Void)?
     private var busy = false
+    /// `ContentKind.totals` for the current index; nil after anything changes it.
+    var cachedKinds: [ContentKind: UInt64]?
+    var kindsComputations = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     public init(volumeRoot: URL, store: URL, saveDebounce: Duration = .seconds(30), compactAbove: Double = 0.25) {
@@ -69,6 +72,7 @@ public actor LiveIndex {
         let volumeURL = try URL(filePath: rootPath).resourceValues(forKeys: [.volumeURLKey]).volume ?? URL(filePath: "/")
         mountPoint = volumeURL.path(percentEncoded: false).trimmingTrailingSlash()
 
+        cachedKinds = nil
         var reason: String?
         var loaded: ScanIndex?
         do {
@@ -125,8 +129,9 @@ public actor LiveIndex {
         guard !closed, let index, !changes.isEmpty else { return }
         let maxID = changes.map(\.id).max() ?? index.lastEventID
         do {
-            try await applyLocked(changes, to: index)
+            if try await applyLocked(changes, to: index) { cachedKinds = nil }
         } catch {
+            cachedKinds = nil
             // Part of the change may be in the index; drop the snapshot so a crash means a
             // full rescan, and rescan on the next apply. The event ID stays put.
             needsFullRescan = true
@@ -138,12 +143,14 @@ public actor LiveIndex {
         scheduleSave()
     }
 
-    private func applyLocked(_ changes: [FSChange], to index: ScanIndex) async throws {
+    /// Returns false when nothing in the index was touched (every path outside the root).
+    private func applyLocked(_ changes: [FSChange], to index: ScanIndex) async throws -> Bool {
         if needsFullRescan || changes.contains(where: \.historyLost) {
             index.resetContents(of: 0)
             try fault?()
             try await scan(index, starting: [0])
             needsFullRescan = false
+            return true
         } else {
             var relists: Set<FolderID> = []
             var subtrees: Set<FolderID> = []
@@ -167,6 +174,7 @@ public actor LiveIndex {
             }
             try fault?()
             if !toScan.isEmpty { try await scan(index, starting: toScan) }
+            return !relists.isEmpty || !subtrees.isEmpty
         }
     }
 
@@ -206,6 +214,7 @@ public actor LiveIndex {
             try? FileManager.default.removeItem(at: temp)
             current = compacted
             index = compacted
+            cachedKinds = nil
         }
         try current.save(to: store)
     }

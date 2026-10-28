@@ -26,12 +26,12 @@ public enum ContentKind: String, CaseIterable, Codable, Sendable {
         ]
     }()
 
-    private static func matches(_ pattern: [String], _ parts: [String]) -> Bool {
+    private static func matches(_ pattern: [String], _ parts: ArraySlice<String>) -> Bool {
         if pattern.first == "**" {
-            let rest = Array(pattern.dropFirst())
+            let rest = pattern.dropFirst()
             guard !rest.isEmpty, parts.count >= rest.count else { return false }
-            return (0...(parts.count - rest.count)).contains { start in
-                matches(rest, Array(parts[start...]))
+            return (parts.startIndex...(parts.endIndex - rest.count)).contains { start in
+                zip(rest, parts[start...]).allSatisfy { $0 == "*" || $0 == $1 }
             }
         }
         guard parts.count >= pattern.count else { return false }
@@ -41,16 +41,20 @@ public enum ContentKind: String, CaseIterable, Codable, Sendable {
     /// The kind a folder (path relative to the scanned root) belongs to, or nil when
     /// no rule matches and the caller should look deeper. Never returns `.other`.
     public static func classify(_ relativePath: String) -> ContentKind? {
-        let parts = relativePath.lowercased().split(separator: "/").map(String.init)
+        classify(parts: relativePath.lowercased().split(separator: "/").map(String.init))
+    }
+
+    /// `classify` for a path already split into lowercased components.
+    static func classify(parts: [String]) -> ContentKind? {
         guard !parts.isEmpty else { return nil }
-        for rule in rules where rule.patterns.contains(where: { matches($0, parts) }) {
+        for rule in rules where rule.patterns.contains(where: { matches($0, parts[...]) }) {
             return rule.kind
         }
         return nil
     }
 
     /// True when some rule earlier than `kind`'s could still match a folder below `parts`.
-    private static func higherPriorityMayMatchDeeper(than kind: ContentKind, _ parts: [String]) -> Bool {
+    static func higherPriorityMayMatchDeeper(than kind: ContentKind, _ parts: [String]) -> Bool {
         let limit = rules.firstIndex { $0.kind == kind } ?? rules.count
         for rule in rules[..<limit] {
             for pattern in rule.patterns {
@@ -65,28 +69,27 @@ public enum ContentKind: String, CaseIterable, Codable, Sendable {
     /// Bytes per kind. A folder takes the kind of its matching rule, or its parent's kind
     /// (`.other` at the root). If no higher-priority rule could match below it, the whole
     /// subtree goes to that kind; otherwise only its direct files do and the walk descends.
+    /// Direct bytes are the folder's total minus its subfolders' totals, so no file record
+    /// is read, and each folder's path is carried down already split and lowercased.
     public static func totals(in index: ScanIndex) -> [ContentKind: UInt64] {
         var result: [ContentKind: UInt64] = [:]
-        var stack: [(id: FolderID, path: String, inherited: ContentKind)] = [(0, "", .other)]
-        while let (id, path, inherited) = stack.popLast() {
+        var stack: [(id: FolderID, parts: [String], inherited: ContentKind)] = [(0, [], .other)]
+        while let (id, parts, inherited) = stack.popLast() {
             let folder = index.folders[Int(id)]
-            let kind = classify(path) ?? inherited
-            let parts = path.lowercased().split(separator: "/").map(String.init)
+            let kind = classify(parts: parts) ?? inherited
             if kind != .other, !higherPriorityMayMatchDeeper(than: kind, parts) {
                 result[kind, default: 0] += folder.totalAllocated
                 continue
             }
-            var direct = folder.smallAllocated
-            for i in 0..<folder.bigFileCount {
-                if let rec = try? index.files.record(folder.firstFile + FileIndex(i)) { direct += rec.allocated }
-            }
-            if direct > 0 { result[kind, default: 0] += direct }
+            var direct = folder.totalAllocated
             var child = folder.firstChildFolder
             while child != noFolder {
-                let name = index.folderName(child)
-                stack.append((child, path.isEmpty ? name : path + "/" + name, kind))
-                child = index.folders[Int(child)].nextSibling
+                let record = index.folders[Int(child)]
+                direct -= min(direct, record.totalAllocated)
+                stack.append((child, parts + [index.folderName(child).lowercased()], kind))
+                child = record.nextSibling
             }
+            if direct > 0 { result[kind, default: 0] += direct }
         }
         return result
     }

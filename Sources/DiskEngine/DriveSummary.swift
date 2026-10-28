@@ -49,16 +49,25 @@ extension LiveIndex {
         await lock()
         defer { unlock() }
         guard let index else { preconditionFailure("LiveIndex used before open()") }
-        let current = try SizeSnapshot.capture(index)
         var changes: [Change] = []
         var net: Int64?
         let today = Day(now, calendar: .current)
+        // The live snapshot is only needed to compare against history.
         if let then = try history.snapshot(onOrBefore: today.adding(days: -days, calendar: .current)) {
-            changes = Array(ChangeReport.changes(from: then, to: current).prefix(5))
+            changes = Array(ChangeReport.changes(from: then, to: try SizeSnapshot.capture(index)).prefix(5))
             net = Int64(bitPattern: index.folders[0].totalAllocated) - Int64(bitPattern: then.sizes[""] ?? 0)
         }
+        // Kinds don't depend on the period; work them out once per index state.
+        let kinds: [ContentKind: UInt64]
+        if let cachedKinds {
+            kinds = cachedKinds
+        } else {
+            kinds = ContentKind.totals(in: index)
+            cachedKinds = kinds
+            kindsComputations += 1
+        }
         return DriveSummary(
-            scannedBytes: index.folders[0].totalAllocated, kinds: ContentKind.totals(in: index),
+            scannedBytes: index.folders[0].totalAllocated, kinds: kinds,
             changes: changes, net: net, period: days, updatedAt: now)
     }
 }
