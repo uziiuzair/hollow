@@ -858,9 +858,11 @@ public actor LiveIndex {
         fresh.rootDevice = device
         fresh.fseventsUUID = journal
         fresh.exclusions = exclusions
-        // Events during the scan are replayed afterwards and re-list what they touch.
-        fresh.lastEventID = FSEventsGetCurrentEventId()
-        coveredThrough = currentEventID()
+        // Events during the scan are replayed afterwards and re-list what they touch. The stream is the volume's own,
+        // so its start and the drop rule's coverage are on the same scale.
+        let start = currentEventID()
+        fresh.lastEventID = start
+        coveredThrough = start
         try await scan(fresh, starting: [0])
         // A root that hung leaves an empty index: never keep (or save) that as the volume.
         guard !fresh.folders[0].flags.contains(.stale) else {

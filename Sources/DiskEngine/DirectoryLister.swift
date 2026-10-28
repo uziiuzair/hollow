@@ -1,6 +1,7 @@
 import Darwin
 import Dispatch
 import Foundation
+import os
 
 /// The folders macOS guards with a privacy prompt unless the app has Full Disk Access. Opening one without it waits for
 /// an answer that may never come (nobody there, or the screen locked), so they are read as unreadable without being
@@ -51,24 +52,27 @@ public struct ProtectedData: Sendable, Equatable {
 /// Lists directories on a fixed pool of `threads` listing threads, each listing under deadlines, so a folder that hangs
 /// in the kernel (a privacy prompt that can't show, a File Provider folder, a dead mount) costs its caller seconds, not
 /// minutes. Three deadlines, each giving up on the caller's behalf while the thread, if it has one, is left blocked:
-/// - a request that hasn't started `startTimeout` after it was made is skipped (every thread busy);
+/// - a request that hasn't started `startTimeout` after it was made is skipped, but only once the pool is stuck: every
+///   thread hung, or none finished or read a batch in the last `startTimeout`. A pool that is only busy keeps it queued;
 /// - open() must return within `timeout` of the thread starting the request;
 /// - after that, each `getattrlistbulk` batch must return within `idleTimeout` of the last (a dead network mount).
 ///
-/// A thread that hangs stays counted, so the pool can drain to nothing; then every listing is skipped at once. A
-/// folder that timed out, and anything under it, is skipped for `skipFor` and while its thread is still out.
+/// A thread that hangs stays counted, so the pool can drain to nothing; then every listing is skipped at once, and that
+/// is logged (by the kind of folder, never the path) along with the pool coming back. A folder that timed out, and
+/// anything under it, is skipped for `skipFor` and while its thread is still out.
 public final class DirectoryLister: @unchecked Sendable {
     public enum Outcome: Sendable {
         case listed(DirectoryListing)
         /// open() or a read didn't return in time; its thread is left blocked.
         case timedOut
-        /// Not tried: the folder or one above it hung recently or still has its thread, every thread hung, or no thread
-        /// was free in time.
+        /// Not tried: the folder or one above it hung recently or still has its thread, every thread hung, or the pool
+        /// made no progress for `startTimeout` while it waited.
         case skipped
     }
 
     /// One per process, so the pool covers every volume.
     public static let shared = DirectoryLister()
+    private static let log = Logger(subsystem: "com.ooozzy.diskinventory", category: "lister")
 
     public let threads: Int
     public let timeout: Duration
@@ -108,6 +112,11 @@ public final class DirectoryLister: @unchecked Sendable {
     private var skipUntil: [String: ContinuousClock.Instant] = [:]
     /// When the watchdog will next fire; a deadline earlier than that arms it again.
     private var watchdogDue: DispatchTime?
+    /// When a thread last finished a listing or read a batch: the pool is getting through its queue.
+    private var lastProgress = DispatchTime.now()
+    /// Every thread hung, and that has been reported.
+    private var down = false
+    private var report: @Sendable (String) -> Void = { DirectoryLister.log.info("\($0, privacy: .public)") }
 
     /// `now` (tests) is the clock `skipFor` is measured with; deadlines always use the real one. `read` must call its
     /// third argument when open() returns and after each batch it reads.
@@ -137,6 +146,24 @@ public final class DirectoryLister: @unchecked Sendable {
     public var threadCount: Int { condition.withLock { running } }
     /// Paths skipped because they timed out recently.
     public var skippedPaths: Set<String> { condition.withLock { Set(skipUntil.keys) } }
+    /// Requests made and not yet answered, queued ones included.
+    var outstandingCount: Int { condition.withLock { requests.count } }
+
+    /// Test hook: where the pool going down and coming back is reported, instead of the log.
+    func injectReport(_ report: @escaping @Sendable (String) -> Void) {
+        condition.withLock { self.report = report }
+    }
+
+    /// What kind of folder `path` is, for the log: a home folder's path names its owner.
+    static func pathClass(_ path: String) -> String {
+        let data = "/System/Volumes/Data"
+        let path = path.hasPrefix(data + "/") ? String(path.dropFirst(data.count)) : path
+        if path.hasPrefix("/Volumes/") { return "other volume" }
+        if path.contains("/Library/CloudStorage/") || path.contains("/Library/Mobile Documents/") { return "cloud storage" }
+        if ProtectedData.containerFolders.contains(where: { path.contains("/\($0)/") }) { return "app container" }
+        guard path.hasPrefix("/Users/") else { return "system" }
+        return path.split(separator: "/").dropFirst(2).first == "Library" ? "home Library" : "home folder"
+    }
 
     public func list(path: String, folder: FolderID) async -> Outcome {
         await withCheckedContinuation { continuation in
@@ -205,6 +232,7 @@ public final class DirectoryLister: @unchecked Sendable {
     /// open() returned, or a batch was read: the request is alive, and has `idleTimeout` for the next batch.
     private func progress(_ ticket: UInt64) {
         condition.withLock {
+            lastProgress = .now()
             guard requests[ticket] != nil else { return }
             requests[ticket]!.phase = .reading
             requests[ticket]!.deadline = .now() + Self.interval(idleTimeout)
@@ -213,17 +241,21 @@ public final class DirectoryLister: @unchecked Sendable {
     }
 
     private func finished(_ ticket: UInt64, path: String, _ listing: DirectoryListing) {
-        let request = condition.withLock { () -> Request? in
+        let (request, message) = condition.withLock { () -> (Request?, String?) in
             busy.remove(path)
+            lastProgress = .now()
             guard let request = requests.removeValue(forKey: ticket) else {
                 // It had timed out and the thread is back: it serves again, and the folder (likely only slow) is no
                 // longer skipped.
                 hung.remove(path)
                 skipUntil[path] = nil
-                return nil
+                guard down else { return (nil, nil) }
+                down = false
+                return (nil, "Listing pool back: a hung thread returned, \(hung.count) of \(threads) still hung")
             }
-            return request
+            return (request, nil)
         }
+        if let message { condition.withLock { report }(message) }
         request?.continuation.resume(returning: .listed(listing))
     }
 
@@ -237,27 +269,41 @@ public final class DirectoryLister: @unchecked Sendable {
     }
 
     private func expire() {
-        let overdue = condition.withLock { () -> [(Request, Outcome)] in
+        let (overdue, message) = condition.withLock { () -> ([(Request, Outcome)], String?) in
             let current = DispatchTime.now()
             // A later timer is still pending when an earlier one was armed after it; only the due one clears this.
             if let due = watchdogDue, due <= current { watchdogDue = nil }
             var given: [(Request, Outcome)] = []
-            for (ticket, request) in requests where request.deadline <= current {
+            for (ticket, request) in requests where request.phase != .queued && request.deadline <= current {
                 requests[ticket] = nil
-                if request.phase == .queued {
-                    // Never started: no thread to leave behind.
-                    queue.removeAll { $0 == ticket }
-                    busy.remove(request.path)
-                    given.append((request, .skipped))
-                } else {
-                    hung.insert(request.path)
-                    skipUntil[request.path] = now() + skipFor
-                    given.append((request, .timedOut))
+                hung.insert(request.path)
+                skipUntil[request.path] = now() + skipFor
+                given.append((request, .timedOut))
+            }
+            // A queued request past its deadline waits on while threads still finish or read; once every thread hung,
+            // or none has for `startTimeout`, it is skipped. Never started: no thread to leave behind.
+            let drained = hung.count >= threads
+            let stalled = lastProgress + Self.interval(startTimeout)
+            for (ticket, request) in requests where request.phase == .queued && (drained || request.deadline <= current) {
+                if !drained, stalled > current {
+                    requests[ticket]!.deadline = stalled
+                    continue
                 }
+                requests[ticket] = nil
+                queue.removeAll { $0 == ticket }
+                busy.remove(request.path)
+                given.append((request, .skipped))
+            }
+            var message: String?
+            if drained, !down {
+                down = true
+                let kinds = Dictionary(grouping: hung, by: Self.pathClass).map { "\($0.key) \($0.value.count)" }.sorted()
+                message = "Listing pool down: all \(threads) threads hung (\(kinds.joined(separator: ", "))); listings skip until one returns"
             }
             armWatchdog()
-            return given
+            return (given, message)
         }
+        if let message { condition.withLock { report }(message) }
         for (request, outcome) in overdue { request.continuation.resume(returning: outcome) }
     }
 }

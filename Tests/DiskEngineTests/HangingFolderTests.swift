@@ -552,3 +552,100 @@ private func fillCap(_ folders: DirectoryLister, _ hang: Hang) async {
     #expect(FSChange.from(path: "", flags: FSEventStreamEventFlags(kFSEventStreamEventFlagEventIdsWrapped), id: 7)?.idsWrapped == true)
     try await live.close()
 }
+
+/// Each listing reports progress and takes `seconds`: slow, but alive.
+private func slowRead(_ seconds: Double) -> @Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing {
+    { _, folder, progress in
+        progress()
+        usleep(UInt32(seconds * 1_000_000))
+        return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
+    }
+}
+
+@Test func aBusyPoolThatMakesProgressSkipsNothing() async throws {
+    // Three rounds of 2 s through 8 threads: the last eight wait 4 s, past the 3 s start deadline.
+    let folders = DirectoryLister(startTimeout: .seconds(3), read: slowRead(2))
+    let outcomes = await withTaskGroup(of: Bool.self) { group in
+        for i in 0..<20 {
+            group.addTask {
+                if case .listed = await folders.list(path: "/slow/\(i)", folder: 0) { return true }
+                return false
+            }
+        }
+        return await group.reduce(into: [Bool]()) { $0.append($1) }
+    }
+    #expect(outcomes.filter { $0 }.count == 20)
+    #expect(folders.skippedPaths.isEmpty)
+}
+
+@Test func aRequestBehindEightHungThreadsStillSkips() async throws {
+    let hang = Hang()
+    hang.block(under: "/hang/")
+    // Their opens aren't overdue yet: only the lack of progress says the pool is stuck.
+    let folders = lister(hang, timeout: .seconds(30))
+    defer { hang.release() }
+    for i in 0..<8 { Task { _ = await folders.list(path: "/hang/\(i)", folder: 0) } }
+    for _ in 0..<100 where hang.opened.count < 8 { try await Task.sleep(for: .milliseconds(10)) }
+    let started = ContinuousClock.now
+    if case .skipped = await folders.list(path: "/queued", folder: 0) {} else { Issue.record("not skipped") }
+    #expect(ContinuousClock.now - started < .seconds(6.5))
+}
+
+@Test func theScannerNeverAsksForMoreThanThePoolHas() async throws {
+    let peak = OSAllocatedUnfairLock(initialState: 0)
+    let box = OSAllocatedUnfairLock<DirectoryLister?>(initialState: nil)
+    let folders = DirectoryLister(threads: 2, read: { path, folder, progress in
+        let outstanding = box.withLock { $0 }?.outstandingCount ?? 0
+        peak.withLock { $0 = max($0, outstanding) }
+        usleep(20_000)
+        return DirectoryLister.read(path, folder, progress)
+    })
+    box.withLock { $0 = folders }
+    var spec: [String: Int] = [:]
+    for i in 0..<20 { spec["d\(i)/f.bin"] = 10 }
+    let scanner = DiskScanner(root: try Fixtures.tree(spec), storage: try Fixtures.tempDir(), workers: 16, lister: folders)
+    #expect(scanner.workers == 2)
+    _ = try await scanner.run()
+    #expect(peak.withLock { $0 } <= 2)
+}
+
+@Test func aPoolThatDrainsIsReportedOnceAndAgainWhenBack() async throws {
+    let hang = Hang()
+    hang.block(under: "/Volumes/")
+    let folders = lister(hang, timeout: .milliseconds(100), startTimeout: .milliseconds(300))
+    let reports = OSAllocatedUnfairLock(initialState: [String]())
+    folders.injectReport { message in reports.withLock { $0.append(message) } }
+    defer { hang.release() }
+    await withTaskGroup(of: Void.self) { group in
+        for i in 0..<10 { group.addTask { _ = await folders.list(path: "/Volumes/Backup \(i)/x", folder: 0) } }
+    }
+    _ = await folders.list(path: "/elsewhere", folder: 0)
+    let down = reports.withLock { $0 }
+    #expect(down.count == 1)
+    #expect(down.first?.contains("other volume") == true)
+    #expect(down.first?.contains("Backup") == false)
+
+    hang.release()
+    for _ in 0..<100 where folders.abandonedCount > 0 { try await Task.sleep(for: .milliseconds(20)) }
+    #expect(reports.withLock { $0 }.count == 2)
+}
+
+@Test func theListingPoolNamesPathsByClass() {
+    #expect(DirectoryLister.pathClass("/Volumes/Backup/x") == "other volume")
+    #expect(DirectoryLister.pathClass("/Users/me/Library/CloudStorage/Drive/x") == "cloud storage")
+    #expect(DirectoryLister.pathClass("/Users/me/Library/Mobile Documents/x") == "cloud storage")
+    #expect(DirectoryLister.pathClass("/Users/me/Library/Containers/com.x/Data") == "app container")
+    #expect(DirectoryLister.pathClass("/System/Volumes/Data/Users/me/Library/Caches") == "home Library")
+    #expect(DirectoryLister.pathClass("/Users/me/Projects") == "home folder")
+    #expect(DirectoryLister.pathClass("/Library/Updates") == "system")
+}
+
+@Test func theReplayStartsOnTheVolumesOwnClock() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 10])
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir(), coalesceWindow: .seconds(10))
+    await live.injectCurrentEventID { 4_242 }
+    await live.disableWatcher()
+    _ = try await live.open()
+    #expect(await live.withIndex { $0.lastEventID } == 4_242)
+    try await live.close()
+}

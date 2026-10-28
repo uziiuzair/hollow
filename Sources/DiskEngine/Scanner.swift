@@ -17,8 +17,8 @@ public struct ScanResult {
     public var unreadableFolders: Int
 }
 
-/// Walks a tree with up to `workers` directory listings in flight. Workers only
-/// read; the loop in `run()` is the single writer of the index.
+/// Walks a tree with up to `workers` directory listings in flight, never more than the lister has threads (so none
+/// waits on another of this scan's). Workers only read; the loop in `run()` is the single writer of the index.
 public final class DiskScanner: Sendable {
     public let root: URL
     public let storage: URL
@@ -33,7 +33,7 @@ public final class DiskScanner: Sendable {
                 lister: DirectoryLister = .shared, protected: ProtectedData? = nil) {
         self.root = root
         self.storage = storage
-        self.workers = max(1, workers)
+        self.workers = max(1, min(workers, lister.threads))
         self.lister = lister
         self.protected = protected
         (progress, progressSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
