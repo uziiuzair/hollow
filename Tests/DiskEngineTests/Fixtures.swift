@@ -69,3 +69,18 @@ extension Fixtures {
         return total
     }
 }
+
+extension Fixtures {
+    /// The real path with every symlink resolved, keeping "/private" (Foundation's
+    /// `resolvingSymlinksInPath` strips it, FSEvents and realpath don't).
+    static func realPath(_ url: URL) -> String {
+        guard let p = realpath(url.path, nil) else { return url.path }
+        defer { free(p) }
+        return String(cString: p)
+    }
+
+    static func write(_ url: URL, bytes: Int) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(repeating: 0xA5, count: bytes).write(to: url)
+    }
+}
