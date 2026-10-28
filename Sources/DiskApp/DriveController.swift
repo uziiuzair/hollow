@@ -106,10 +106,10 @@ public final class DriveController: ObservableObject {
             let live = LiveIndex(volumeRoot: volume.url, store: store)
             // Without a snapshot or a journal, open() will do a full scan.
             activity = (snapshotExists && hasJournal) ? .opening : .scanning
+            // Held so willUnmount() can cancel it (nothing suspends between the
+            // unmounting check above and this assignment).
             let task = Task { try await live.open() }
             opening = task
-            // An unmount that came in before the task existed still cancels it.
-            if unmounting { task.cancel() }
             do {
                 _ = try await task.value
                 opening = nil
