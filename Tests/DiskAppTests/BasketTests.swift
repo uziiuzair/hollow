@@ -121,7 +121,8 @@ let dockerHit = LensHit(ruleID: "docker", path: "Users/u/Library/Containers/com.
 
 @Test func structuralFoldersHaveNoCheckbox() {
     let paths = ["", "Users", "Users/u", "Users/u/Library", "USERS/u/Pictures", "Users/u/.Trash", "Users/u/Applications", "Volumes",
-                 "System", "Library", ".Trashes", ".Spotlight-V100", ".DocumentRevisions-V100"]
+                 "System", "Library", ".Trashes", ".Spotlight-V100", ".DocumentRevisions-V100",
+                 "Users/u/Library/Mobile Documents", "Backups.backupdb", "opt", ".TemporaryItems", "MobileSoftwareUpdate"]
     let s = ReviewSheet.make(items: paths.map { item($0, 1, folder: true) } + [item("Users/u/Movies/clip.mov", 2)], unchecked: [],
                              protected: [], driveName: "Macintosh HD", driveConnected: true)
     #expect(s.rows.map(\.isCheckable) == Array(repeating: false, count: paths.count) + [true])

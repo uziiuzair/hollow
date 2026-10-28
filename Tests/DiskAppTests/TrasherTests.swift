@@ -172,3 +172,42 @@ struct RootRemovingTrash: TrashBackend {
     let mixed = TrashOutcome(moved: ["x"], failures: [.init(path: "o", name: "o", reason: .outsideDrive)], freed: 12_000_000_000)
     #expect(mixed.title == "Freed 12 GB" && mixed.failureLines == ["o: no longer on this drive."])
 }
+
+@Test func aSymlinkInTheParentChainCannotDodgeTheChecks() async throws {
+    let root = try Fixtures.tree(["Users/u/Library/Containers/com.docker.docker/Data/Docker.raw": 2_000_000, "Users/u/proj/x.txt": 10])
+    let rootPath = Fixtures.realPath(root)
+    try FileManager.default.createSymbolicLink(atPath: rootPath + "/Users/u/proj/lnk", withDestinationPath: rootPath + "/Users/u/Library/Containers")
+    try FileManager.default.createSymbolicLink(atPath: rootPath + "/Users/u/proj/home", withDestinationPath: rootPath + "/Users/u")
+    let (out, _) = try await trash([item("Users/u/proj/lnk/com.docker.docker", 1, folder: true), item("Users/u/proj/home/Library", 1, folder: true)],
+                                   in: root, protected: [])
+    #expect(out.moved.isEmpty)
+    #expect(out.failures == [.init(path: "Users/u/proj/lnk/com.docker.docker", name: "com.docker.docker", reason: .outsideDrive),
+                             .init(path: "Users/u/proj/home/Library", name: "Library", reason: .outsideDrive)])
+    #expect(FileManager.default.fileExists(atPath: rootPath + "/Users/u/Library/Containers/com.docker.docker/Data/Docker.raw"))
+}
+
+@Test func aRootThatComesBackStaysGone() throws {
+    let root = try Fixtures.tree(["a.bin": 1_000, "b.bin": 1_000, "c.bin": 1_000])
+    let rootPath = Fixtures.realPath(root)
+    nonisolated(unsafe) var rootStats = 0
+    let out = Trasher.move([item("a.bin", 1), item("b.bin", 2), item("c.bin", 3)], root: rootPath, protected: [], rules: .bundled,
+                           expectedDevice: nil, backend: FixtureTrash(bin: try Fixtures.tempDir())) { path in
+        guard path == rootPath else { return Trasher.realStat(path) }
+        rootStats += 1
+        return rootStats == 3 ? .failed(ENOENT) : Trasher.realStat(path)   // gone before b.bin only, back before c.bin
+    }
+    #expect(out.moved == ["a.bin"] && out.failures.map(\.reason) == [.driveGone, .driveGone])
+    #expect(FileManager.default.fileExists(atPath: rootPath + "/c.bin"))
+}
+
+@Test func caseVariantsInOneRequestAreCountedOnce() async throws {
+    let root = try Fixtures.tree(["a/b.bin": 1_000])
+    let (out, _) = try await trash([item("A/b.bin", 1), item("a", 10, folder: true), item("A", 10, folder: true)], in: root)
+    #expect(out.freed == 10 && out.failures.isEmpty && out.moved == ["A/b.bin", "a", "A"])
+}
+
+@Test func moreStructuralFoldersAreRefused() async throws {
+    let root = try Fixtures.tree(["usr/x": 10, "Users/u/Library/CloudStorage/y": 10])
+    let (out, _) = try await trash([item("usr", 1, folder: true), item("Users/u/Library/CloudStorage", 1, folder: true)], in: root)
+    #expect(out.moved.isEmpty && out.failures.map(\.reason) == Array(repeating: .failed(ReviewSheet.structuralReason), count: 2))
+}

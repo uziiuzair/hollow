@@ -136,11 +136,15 @@ public enum Trasher {
             case nil: candidates.append(item)
             }
         }
-        // An item inside another item of the same request moves with it, and its bytes count once, in the outer item.
-        func outermost(_ item: BasketItem) -> BasketItem? {
-            candidates.filter { $0.path != item.path && $0.covers(item.path) }.min { $0.path.count < $1.path.count }
+        // An item inside another item of the same request (or the same path in another case) moves with it, and its bytes
+        // count once, in the outermost item: the shortest covering path, then the first listed.
+        let lowered = candidates.map { $0.path.lowercased() }
+        func outermost(_ i: Int) -> Int {
+            lowered.indices.filter { lowered[i] == lowered[$0] || lowered[i].hasPrefix(lowered[$0] + "/") }
+                .min { (lowered[$0].count, $0) < (lowered[$1].count, $1) }!
         }
-        let outers = candidates.filter { outermost($0) == nil }
+        let outerIndex = candidates.indices.map(outermost)
+        let outers = candidates.indices.filter { outerIndex[$0] == $0 }.map { candidates[$0] }
 
         func rootDevice() -> dev_t? {
             if case .ok(let st) = statFn(base), (st.st_mode & S_IFMT) == S_IFDIR { return st.st_dev }
@@ -148,18 +152,22 @@ public enum Trasher {
         }
         var freed: UInt64 = 0
         let device = rootDevice()
+        let resolvedRoot = realPath(base)
+        var gone = false
         for item in outers {
             // The root is checked before every item, so an ejected or replaced drive fails the rest as gone, not as already gone.
-            guard let device, expectedDevice == nil || expectedDevice == device, rootDevice() == device else {
+            // Once gone, it stays gone for this request, even if something comes back at that path.
+            guard !gone, let device, let resolvedRoot, expectedDevice == nil || expectedDevice == device, rootDevice() == device else {
+                gone = true
                 results[item.path] = .some(.driveGone)
                 continue
             }
-            let reason = moveOne(item, base: base, device: device, backend: backend, stat: statFn)
+            let reason = moveOne(item, base: base, resolvedRoot: resolvedRoot, device: device, backend: backend, stat: statFn)
             results[item.path] = .some(reason)
             if reason == nil { freed += item.size }
         }
-        for item in candidates {
-            if let outer = outermost(item) { results[item.path] = results[outer.path] ?? .some(.driveGone) }
+        for i in candidates.indices where outerIndex[i] != i {
+            results[candidates[i].path] = results[candidates[outerIndex[i]].path] ?? .some(.driveGone)
         }
 
         var moved: [String] = []
@@ -177,7 +185,7 @@ public enum Trasher {
     }
 
     /// Nil when the item moved.
-    private static func moveOne(_ item: BasketItem, base: String, device: dev_t, backend: some TrashBackend,
+    private static func moveOne(_ item: BasketItem, base: String, resolvedRoot: String, device: dev_t, backend: some TrashBackend,
                                 stat statFn: (String) -> StatResult) -> TrashFailure? {
         let physical = TrashPath.physicalPath(root: base, relative: item.path)
         // lstat: the item itself is never followed, so a symlink item moves as the link.
@@ -188,12 +196,15 @@ public enum Trasher {
         }
         // A different drive mounted inside the root, or anything else on another device, is not this drive.
         guard itemStat.st_dev == device else { return .outsideDrive }
-        // The parent must still resolve inside the drive. A folder on the way swapped for a symlink fails here.
+        // The parent must resolve to exactly the folder the path names: no symlink anywhere in the parent chain. Otherwise a
+        // link could lead outside the drive, or to an app-managed or system folder the checks above never saw by that name.
         // Known gap (accepted): the parent could still be swapped between this check and the move. That needs a local attacker
         // racing a list the user just reviewed by hand, and the check still stops every stale or mistaken path.
         let parent = (physical as NSString).deletingLastPathComponent
         guard let resolved = realPath(parent) else { return failure(errno: errno) }
-        guard resolved == base || resolved.hasPrefix(base == "/" ? "/" : base + "/") else { return .outsideDrive }
+        let writtenParent = item.path.split(separator: "/").dropLast().joined(separator: "/")
+        let expected = writtenParent.isEmpty ? resolvedRoot : (resolvedRoot == "/" ? "/" : resolvedRoot + "/") + writtenParent
+        guard resolved.lowercased() == expected.lowercased() else { return .outsideDrive }
 
         let target = trashPath(physical: physical, physicalStat: itemStat, root: base, relative: item.path, stat: statFn)
         do {

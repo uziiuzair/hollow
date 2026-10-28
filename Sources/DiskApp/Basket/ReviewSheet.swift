@@ -130,8 +130,9 @@ enum StructuralFolders {
         "Users/*", "Users/*/Library", "Users/*/.Trash",
         "Users/*/Desktop", "Users/*/Documents", "Users/*/Downloads", "Users/*/Movies", "Users/*/Music",
         "Users/*/Pictures", "Users/*/Public", "Users/*/Applications",
-        "Applications", "Library", "System", "Users", "Volumes", "private",
-        ".Trashes", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100",
+        "Users/*/Library/Mobile Documents", "Users/*/Library/CloudStorage",
+        "Applications", "Library", "System", "Users", "Volumes", "private", "usr", "opt", "cores", "MobileSoftwareUpdate",
+        ".Trashes", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100", ".TemporaryItems", "Backups.backupdb",
     ].map(LensPattern.init)
 
     static func contains(_ relativePath: String) -> Bool {
