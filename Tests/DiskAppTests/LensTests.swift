@@ -160,3 +160,40 @@ import DiskEngine
     #expect(rules.rule(covering: "a/junk")?.id == "x")
     #expect(rules.rule(covering: "a/Backups.backupdb/b/junk") == nil)
 }
+
+// Final review I3: the walk can run in chunks (the controller lets go of the index lock between them), with the same
+// report as one pass, and a cancelled walk stops early.
+@Test func aWalkInChunksMatchesOnePass() async throws {
+    let idx = try await Fixtures.index([
+        "Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000,
+        "Users/u/code/a/node_modules/x.bin": 2_000_000, "Users/u/code/b/node_modules/y.bin": 1_500_000,
+        "Users/u/Library/Caches/com.app/z.bin": 1_200_000, "Users/u/Documents/d/e/f/g.bin": 10,
+    ])
+    let whole = LensMatcher.report(index: idx, rules: .bundled)
+    var walk = LensWalk(rules: .bundled)
+    var chunks = 0
+    while !walk.isFinished {
+        walk.advance(index: idx, folders: 1)
+        chunks += 1
+    }
+    #expect(chunks > 5)
+    #expect(walk.report() == whole)
+}
+
+@Test func aCancelledWalkReturnsEarly() async throws {
+    var spec: [String: Int] = [:]
+    for i in 0..<300 { spec["Users/u/many/f\(i)/x.bin"] = 10 }
+    let visited = try await Task {
+        // Built first: a cancelled scan would stop too.
+        let idx = try await Fixtures.index(spec)
+        withUnsafeCurrentTask { $0?.cancel() }
+        var walk = LensWalk(rules: .bundled, cancelCheckEvery: 16)
+        walk.advance(index: idx, folders: .max)
+        return (walk.foldersVisited, walk.isFinished)
+    }.value
+    #expect(visited.0 <= 16 && !visited.1)
+    let idx = try await Fixtures.index(spec)
+    var full = LensWalk(rules: .bundled, cancelCheckEvery: 16)
+    full.advance(index: idx, folders: .max)
+    #expect(full.isFinished && full.foldersVisited > 300)
+}

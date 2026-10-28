@@ -312,7 +312,8 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
     #expect(DriveController.foldersToRelist(cleared: [], userTrash: "Users/u/.Trash").isEmpty)
 }
 
-// App-managed hits of any size are protected, not just the ones big enough to show; a trash right after warm waits for them.
+// App-managed hits of any size are protected, not just the ones big enough to show. A trash right after warm doesn't wait
+// for the walk (final review I3): the rules alone refuse an app-managed location.
 @MainActor @Test func smallAppManagedHitsAreProtectedWithoutARace() async throws {
     let spec = ["Users/u/Library/Developer/CoreSimulator/dev/x.bin": 100_000,
                 "Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000]
@@ -326,9 +327,12 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
 
     let fresh = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
     await fresh.warm()
-    // No lensSettled(): the trash itself must wait for the walk.
-    _ = await fresh.trash([], backend: FixtureTrash(bin: try Fixtures.tempDir()))
-    #expect(fresh.lastProtected.map(\.path) == ["Users/u/Library/Developer/CoreSimulator"])
+    // No lensSettled(), and an item with no rule of its own: still refused, and nothing moves.
+    let simulators = BasketItem(path: "Users/u/Library/Developer/CoreSimulator", name: "CoreSimulator", size: 100_000,
+                                kind: nil, isFolder: true, ruleID: nil, safety: nil)
+    let out = await fresh.trash([simulators], backend: FixtureTrash(bin: try Fixtures.tempDir()))
+    #expect(out.moved.isEmpty)
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Library/Developer/CoreSimulator/dev/x.bin").path))
     await fresh.cool()
 }
 
@@ -367,9 +371,9 @@ private struct UnmountingTrash: TrashBackend {
     #expect(out.moved == ["Users/u/Library/Developer/Xcode/DerivedData"])
     #expect(out.failures.map(\.path) == ["Users/u/Documents/b"] && out.failures.map(\.reason) == [.driveGone])
     #expect(FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Documents/b/y.bin").path))
-    // Neither recounted nor re-walked.
+    // Neither recounted nor re-walked; the moved item leaves the report in memory (final review I3).
     #expect(c.summary?.scannedBytes == before)
-    #expect(c.lens?.hits.map(\.path) == ["Users/u/Library/Developer/Xcode/DerivedData"])
+    #expect(c.lens?.hits.isEmpty == true && c.lensWalks == 1)
     #expect(c.activity == .offline)
 }
 
@@ -446,4 +450,37 @@ private final class Flag: @unchecked Sendable {
     #expect(c.activity == .offline)
     let saved = try ScanIndex.load(from: store)
     #expect(!saved.pending.isEmpty, "the retry ran to the end instead of stopping")
+}
+
+// Final review I3: a move to the Trash walks the lens neither before nor after. The report loses the moved items and their
+// bytes in memory; the next warm walks again because the index has changed since.
+@MainActor @Test func trashUpdatesTheLensInMemoryWithoutAWalk() async throws {
+    let root = try Fixtures.tree(["Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000,
+                                  "Users/u/code/web/node_modules/big.bin": 2_000_000,
+                                  "Users/u/code/web/node_modules/small.bin": 1_500_000,
+                                  "Users/u/Documents/d.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.warm()
+    await c.lensSettled()
+    let before = try #require(c.lens)
+    let walks = c.lensWalks
+    #expect(walks == 1 && before.hits.map(\.path) == ["Users/u/code/web/node_modules", "Users/u/Library/Developer/Xcode/DerivedData"])
+    let big = Fixtures.allocatedSize(root.appending(path: "Users/u/code/web/node_modules/big.bin"))
+    let derived = try #require(before.hits.first { $0.ruleID == "xcode-derived-data" })
+    let out = await c.trash([BasketItem.from(hit: derived),
+                             BasketItem(path: "Users/u/code/web/node_modules/big.bin", name: "big.bin", size: big, kind: nil,
+                                        isFolder: false, ruleID: nil, safety: nil)],
+                            backend: FixtureTrash(bin: try Fixtures.tempDir()))
+    #expect(Set(out.moved) == ["Users/u/Library/Developer/Xcode/DerivedData", "Users/u/code/web/node_modules/big.bin"])
+    #expect(c.lensWalks == walks)
+    var expected = before.hits.filter { $0.ruleID != "xcode-derived-data" }
+    expected[0].size -= big
+    #expect(c.lens?.hits == expected)
+    #expect(c.clearable == before.total(.regenerates) - derived.size - big)
+    #expect(c.lens?.generation == before.generation)
+    // Marked stale: the next warm walks once more.
+    await c.warm()
+    await c.lensSettled()
+    #expect(c.lensWalks == walks + 1)
+    await c.cool()
 }

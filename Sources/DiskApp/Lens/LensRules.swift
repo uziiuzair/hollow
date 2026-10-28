@@ -266,3 +266,31 @@ public struct LensReport: Equatable, Sendable {
         hits.reduce(0) { $1.safety == safety ? $0 + $1.size : $0 }
     }
 }
+
+extension LensReport {
+    /// The report with `moved` (relative path to its bytes) gone, without a walk: a hit at or under a moved path leaves,
+    /// and a hit holding a moved path shrinks by its bytes. A moved path under another moved path counts once.
+    public func removing(_ moved: [String: UInt64]) -> LensReport {
+        LensReport(hits: Self.removing(moved, from: hits), generation: generation)
+    }
+
+    static func removing(_ moved: [String: UInt64], from hits: [LensHit]) -> [LensHit] {
+        guard !moved.isEmpty else { return hits }
+        let outer = moved.filter { path, _ in !BasketItem.ancestors(of: path).contains { moved[$0] != nil } }
+        var byPath: [String: Int] = [:]
+        for (i, hit) in hits.enumerated() where byPath[hit.path] == nil { byPath[hit.path] = i }
+        var shrink = [UInt64](repeating: 0, count: hits.count)
+        for (path, bytes) in outer {
+            // The nearest hit strictly above the moved path holds it (hits never nest).
+            if let i = BasketItem.ancestors(of: path).reversed().lazy.compactMap({ byPath[$0] }).first { shrink[i] += bytes }
+        }
+        var out: [LensHit] = []
+        for (i, hit) in hits.enumerated() {
+            if outer[hit.path] != nil || BasketItem.ancestors(of: hit.path).contains(where: { outer[$0] != nil }) { continue }
+            var hit = hit
+            hit.size -= min(hit.size, shrink[i])
+            out.append(hit)
+        }
+        return out.sorted { $0.size > $1.size }
+    }
+}
