@@ -2,16 +2,43 @@ import Darwin
 import Dispatch
 import Foundation
 
+/// Other apps' containers (`~/Library/Containers/<id>`, `~/Library/Group Containers/<id>`). Without Full Disk Access
+/// macOS guards each with a privacy prompt, and open() waits for an answer that may never come, so they are read as
+/// unreadable without being opened. This app's own container is never covered.
+public struct ProtectedContainers: Sendable, Equatable {
+    /// The two container folders, under the home path as given and as seen from the internal disk's data volume.
+    public let parents: [String]
+    public let ownBundleID: String
+
+    public init(home: String, ownBundleID: String) {
+        let data = "/System/Volumes/Data"
+        let homes = home.hasPrefix(data + "/") ? [home] : [home, data + home]
+        parents = homes.flatMap { [$0 + "/Library/Containers", $0 + "/Library/Group Containers"] }
+        self.ownBundleID = ownBundleID
+    }
+
+    /// Whether `path` is another app's container or lies inside one.
+    public func covers(_ path: String) -> Bool {
+        for parent in parents where path.hasPrefix(parent + "/") {
+            let name = path.dropFirst(parent.count + 1).prefix { $0 != "/" }
+            return !name.isEmpty && name != ownBundleID
+        }
+        return false
+    }
+}
+
 /// Lists directories on worker threads with a deadline. A folder whose open() hangs in the kernel (a privacy prompt
 /// that can't show, a File Provider folder, a dead mount) costs its caller `timeout`, not minutes: the caller gets
 /// `.timedOut` and the worker is left blocked. A folder that timed out is skipped for `skipFor`, and while its worker
-/// is still out; once `maxAbandoned` workers are out, every listing is skipped until one comes back.
+/// is still out. Once `maxAbandoned` workers are out, no new worker starts until one comes back: a listing the caller
+/// vouches for runs inline, without a deadline, and every other one is skipped.
 public final class DirectoryLister: @unchecked Sendable {
     public enum Outcome: Sendable {
         case listed(DirectoryListing)
         /// The listing didn't return in time; its worker is abandoned.
         case timedOut
-        /// Not tried: the folder timed out recently or its worker is still out, or too many workers are.
+        /// Not tried: the folder timed out recently or its worker is still out, or too many workers are and the caller
+        /// didn't vouch for it.
         case skipped
     }
 
@@ -23,7 +50,9 @@ public final class DirectoryLister: @unchecked Sendable {
     public let maxAbandoned: Int
     private let now: @Sendable () -> ContinuousClock.Instant
     private let read: @Sendable (String, FolderID) -> DirectoryListing
-    private let queue = DispatchQueue(label: "DirectoryLister", qos: .utility, attributes: .concurrent)
+    /// No QoS of its own: a listing runs at its caller's, as it did when the caller listed inline, so a busy machine
+    /// doesn't starve a utility-QoS worker past its deadline.
+    private let queue = DispatchQueue(label: "DirectoryLister", attributes: .concurrent)
 
     /// A listing someone is waiting for.
     private struct Waiter {
@@ -62,17 +91,25 @@ public final class DirectoryLister: @unchecked Sendable {
     /// Workers that timed out and haven't returned.
     public var abandonedCount: Int { lock.withLock { abandoned } }
 
-    public func list(path: String, folder: FolderID) async -> Outcome {
-        let admitted = lock.withLock { () -> Bool in
-            if abandoned >= maxAbandoned || busy.contains(path) { return false }
+    /// `knownSafe`: the caller has listed this folder without trouble before, so while every worker slot is taken it
+    /// may be listed inline rather than skipped.
+    public func list(path: String, folder: FolderID, knownSafe: Bool = false) async -> Outcome {
+        enum Admission { case worker, inline, skip }
+        let admission = lock.withLock { () -> Admission in
+            if busy.contains(path) { return .skip }
             if let until = skipUntil[path] {
-                if now() < until { return false }
+                if now() < until { return .skip }
                 skipUntil[path] = nil
             }
+            if abandoned >= maxAbandoned { return knownSafe ? .inline : .skip }
             busy.insert(path)
-            return true
+            return .worker
         }
-        guard admitted else { return .skipped }
+        switch admission {
+        case .skip: return .skipped
+        case .inline: return .listed(read(path, folder))
+        case .worker: break
+        }
         return await withCheckedContinuation { continuation in
             let ticket = lock.withLock { () -> UInt64 in
                 nextTicket += 1

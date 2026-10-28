@@ -221,3 +221,103 @@ private func cloudRoot(_ real: String, _ hang: Hang) -> @Sendable (String, Folde
     #expect(result.namesChanged)
     #expect(!idx.folders[Int(id)].flags.contains(.dataless))
 }
+
+// Fix round 1: other apps' containers are never opened without Full Disk Access.
+
+private let ownID = "com.ooozzy.diskinventory"
+
+private func containerIndex(fullDiskAccess: Bool, hang: Hang) async throws -> (LiveIndex, String) {
+    let root = try Fixtures.tree(["Library/Containers/com.other.app/Data/f.bin": 10,
+                                  "Library/Containers/\(ownID)/Data/g.bin": 10,
+                                  "Library/Group Containers/group.com.other/h.bin": 10, "plain/i.bin": 10])
+    let real = Fixtures.realPath(root)
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir(), coalesceWindow: .seconds(10),
+                         protectedContainers: ProtectedContainers(home: real, ownBundleID: ownID),
+                         fullDiskAccess: { fullDiskAccess })
+    await live.injectLister(lister(hang))
+    await live.disableWatcher()
+    _ = try await live.open()
+    return (live, real)
+}
+
+@Test func otherAppsContainersAreNotOpenedWithoutFullDiskAccess() async throws {
+    let hang = Hang()
+    let (live, root) = try await containerIndex(fullDiskAccess: false, hang: hang)
+    let other = root + "/Library/Containers/com.other.app"
+    let group = root + "/Library/Group Containers/group.com.other"
+    #expect(hang.opened.allSatisfy { !$0.hasPrefix(other) && !$0.hasPrefix(group) })
+    #expect(hang.opens(of: root + "/Library/Containers/\(ownID)") == 1)
+    #expect(await record(live, "Library/Containers/com.other.app").flags.contains(.unreadable))
+    #expect(await record(live, "Library/Group Containers/group.com.other").flags.contains(.unreadable))
+    #expect(await record(live, "plain").totalAllocated > 0)
+
+    // A change inside one relists it as unreadable again, still unopened.
+    let base = await live.withIndex { $0.lastEventID } + 1_000_000_000
+    await live.enqueue([change(other + "/Data", base + 1)])
+    #expect(hang.opened.allSatisfy { !$0.hasPrefix(other) })
+    #expect(await record(live, "Library/Containers/com.other.app").flags.contains(.unreadable))
+    try await live.close()
+}
+
+@Test func withFullDiskAccessContainersOpen() async throws {
+    let hang = Hang()
+    let (live, root) = try await containerIndex(fullDiskAccess: true, hang: hang)
+    #expect(hang.opens(of: root + "/Library/Containers/com.other.app") == 1)
+    #expect(hang.opens(of: root + "/Library/Group Containers/group.com.other") == 1)
+    #expect(await record(live, "Library/Containers/com.other.app").totalAllocated > 0)
+    try await live.close()
+}
+
+@Test func protectedContainersCoverOtherAppsOnly() {
+    let c = ProtectedContainers(home: "/Users/u", ownBundleID: ownID)
+    #expect(c.covers("/Users/u/Library/Containers/com.other.app"))
+    #expect(c.covers("/System/Volumes/Data/Users/u/Library/Containers/com.other.app/Data/Library"))
+    #expect(c.covers("/Users/u/Library/Group Containers/ABCDE.group.other"))
+    #expect(!c.covers("/Users/u/Library/Containers/\(ownID)/Data"))
+    #expect(!c.covers("/Users/u/Library/Containers"))
+    #expect(!c.covers("/Users/u/Library/ContainersX/a"))
+    #expect(!c.covers("/Users/v/Library/Containers/com.other.app"))
+}
+
+// Fix round 1: a full worker cap doesn't stop relists of folders that listed fine before.
+@Test func aFullWorkerCapStillLetsOrdinaryChangesLand() async throws {
+    let clock = ManualClock()
+    let hang = Hang()
+    let folders = lister(hang, timeout: .milliseconds(100), clock: clock)
+    let (live, root, base) = try await opened(["a/f.bin": 10, "b/g.bin": 10], clock: clock, lister: folders)
+    defer { hang.release() }
+    hang.block(under: "/hang/")
+    for i in 0..<4 { _ = await folders.list(path: "/hang/\(i)", folder: 0) }
+    #expect(folders.abandonedCount == 4)
+
+    try Fixtures.write(URL(filePath: root + "/a/new.bin"), bytes: 2_000_000)
+    try Fixtures.write(URL(filePath: root + "/a/sub/deep.bin"), bytes: 2_000_000)
+    await live.enqueue([change(root + "/a", base + 1)])
+    let a = await record(live, "a")
+    #expect(a.totalAllocated > 2_000_000)
+    #expect(!a.flags.contains(.stale))
+    // Never listed, so not vouched for: left stale for later, not opened without a deadline.
+    #expect(await record(live, "a/sub").flags.contains(.stale))
+    #expect(hang.opens(of: root + "/a/sub") == 0)
+    #expect(await live.withIndex { $0.lastEventID } == base + 1)
+    try await live.close()
+}
+
+// Fix round 1: a subtree rescan whose root hangs keeps the old size.
+@Test func aSubtreeRescanWhoseRootHangsKeepsItsSize() async throws {
+    let clock = ManualClock()
+    let hang = Hang()
+    let (live, root, base) = try await opened(["a/f.bin": 2_000_000, "a/x/g.bin": 2_000_000, "b/h.bin": 10], clock: clock,
+                                              lister: lister(hang, timeout: .milliseconds(200), clock: clock))
+    defer { hang.release() }
+    let before = await record(live, "a").totalAllocated
+    hang.block(root + "/a")
+    await live.enqueue([FSChange(path: root + "/a", id: base + 1, rescanSubtree: true, historyLost: false)])
+    let a = await record(live, "a")
+    #expect(a.totalAllocated == before)
+    #expect(a.flags.contains(.stale))
+    #expect(await live.withIndex { $0.folder(atRelativePath: "a/x") } != nil)
+    #expect(await live.withIndex { $0.folders[0].totalAllocated } >= before)
+    #expect(await live.withIndex { $0.lastEventID } == base + 1)
+    try await live.close()
+}

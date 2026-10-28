@@ -95,6 +95,8 @@ import Testing
     let locked = root.appending(path: "a/locked").path
     chmod(locked, 0); defer { chmod(locked, 0o755) }
     let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir())
+    // Only the retry may read a/locked: a replayed event relisting it after the chmod would leave nothing to retry.
+    await live.disableWatcher()
     _ = try await live.open()
     #expect(await live.withIndex { $0.folders[Int($0.folder(atRelativePath: "a/locked")!)].flags.contains(.unreadable) })
     #expect(try await live.retryUnreadable() == 0)

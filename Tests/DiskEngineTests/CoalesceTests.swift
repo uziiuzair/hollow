@@ -190,12 +190,13 @@ private func change(_ path: String, _ id: UInt64, subtree: Bool = false) -> FSCh
     let (live, root, base, _) = try await opened(["a/f.bin": 10, "b/g.bin": 10], window: .milliseconds(300))
     await live.enqueue([change(root + "/a", base + 1)])
     try Fixtures.write(URL(filePath: root + "/a/new/deep/h.bin"), bytes: 2_000_000)
-    await live.enqueue([change(root + "/a", base + 2)])  // deferred: the timer flushes it, and its relist finds a/new
+    // Set before the deferred change goes in: on a loaded machine its window can pass before the next line runs.
     let fired = OSAllocatedUnfairLock(initialState: false)
     await live.injectBeforeScan {
         guard !fired.withLock({ let was = $0; $0 = true; return was }) else { return }
         live.assumeIsolated { $0.scheduleFlush() }
     }
+    await live.enqueue([change(root + "/a", base + 2)])  // deferred: the timer flushes it, and its relist finds a/new
     for _ in 0..<100 where await live.withIndex({ $0.lastEventID }) < base + 2 { try await Task.sleep(for: .milliseconds(50)) }
     #expect(fired.withLock { $0 })
     #expect(await live.withIndex { $0.pending.isEmpty })
