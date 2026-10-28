@@ -43,6 +43,12 @@ public final class EventWatcher: @unchecked Sendable {
     #endif
     public let changes: AsyncStream<[FSChange]>
     private let sink: AsyncStream<[FSChange]>.Continuation
+    /// What the callback reaches through the stream's context, retained by the stream: never the watcher, so a callback
+    /// can't hold the watcher past its last owner.
+    private final class Context {
+        let sink: AsyncStream<[FSChange]>.Continuation
+        init(_ sink: AsyncStream<[FSChange]>.Continuation) { self.sink = sink }
+    }
     private let device: dev_t
     private let since: UInt64
     private let latency: Double
@@ -64,11 +70,17 @@ public final class EventWatcher: @unchecked Sendable {
     }
 
     public func start() throws {
+        let box = Context(sink)
         var context = FSEventStreamContext(
-            version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
-            retain: nil, release: nil, copyDescription: nil)
+            version: 0, info: Unmanaged.passUnretained(box).toOpaque(),
+            retain: { info in
+                _ = Unmanaged<Context>.fromOpaque(info!).retain()
+                return info
+            },
+            release: { info in Unmanaged<Context>.fromOpaque(info!).release() },
+            copyDescription: nil)
         let callback: FSEventStreamCallback = { _, info, count, paths, flags, ids in
-            let watcher = Unmanaged<EventWatcher>.fromOpaque(info!).takeUnretainedValue()
+            let context = Unmanaged<Context>.fromOpaque(info!).takeUnretainedValue()
             let cPaths = paths.assumingMemoryBound(to: UnsafePointer<CChar>.self)
             var batch: [FSChange] = []
             batch.reserveCapacity(count)
@@ -83,7 +95,7 @@ public final class EventWatcher: @unchecked Sendable {
                     batch.append(change)
                 }
             }
-            if !batch.isEmpty { watcher.sink.yield(batch) }
+            if !batch.isEmpty { context.sink.yield(batch) }
         }
         let sinceWhen = since == 0 ? FSEventStreamEventId(kFSEventStreamEventIdSinceNow) : since
         guard let stream = FSEventStreamCreateRelativeToDevice(
@@ -99,11 +111,15 @@ public final class EventWatcher: @unchecked Sendable {
         self.stream = stream
     }
 
+    /// On the callback's queue, so a callback still running finishes before the stream (and the event buffers it is
+    /// reading) is released. Never called from a callback.
     public func stop() {
         guard let stream else { return }
-        FSEventStreamStop(stream)
-        FSEventStreamInvalidate(stream)
-        FSEventStreamRelease(stream)
+        queue.sync {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+        }
         self.stream = nil
         sink.finish()
     }
