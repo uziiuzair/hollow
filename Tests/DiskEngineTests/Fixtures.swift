@@ -37,20 +37,22 @@ extension Array {
 }
 
 @testable import DiskEngine
+import os
 
-private nonisolated(unsafe) var nextInode: UInt64 = 1_000
+/// Parallel tests make fixture entries at once, so the counter is locked (the test target runs on macOS 14, before `Atomic`).
+private let inodeCounter = OSAllocatedUnfairLock<UInt64>(initialState: 1_000)
+private func nextInode() -> UInt64 { inodeCounter.withLock { $0 += 1; return $0 } }
 
 extension RawEntry {
     static func file(_ name: String, allocated: UInt64, inode: UInt64? = nil, links: UInt32 = 1) -> RawEntry {
-        nextInode += 1
+        let next = nextInode()
         return RawEntry(name: name, kind: .file, allocated: allocated, logical: allocated, device: 1,
-                        inode: inode ?? nextInode, linkCount: links, flags: [], isMountPoint: false)
+                        inode: inode ?? next, linkCount: links, flags: [], isMountPoint: false)
     }
 
     static func dir(_ name: String) -> RawEntry {
-        nextInode += 1
-        return RawEntry(name: name, kind: .directory, allocated: 0, logical: 0, device: 1,
-                        inode: nextInode, linkCount: 1, flags: [], isMountPoint: false)
+        RawEntry(name: name, kind: .directory, allocated: 0, logical: 0, device: 1,
+                        inode: nextInode(), linkCount: 1, flags: [], isMountPoint: false)
     }
 }
 
