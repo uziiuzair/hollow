@@ -18,6 +18,9 @@ public final class DriveController: ObservableObject {
     @Published public private(set) var generation = 0
     /// The cleanup lens over the open index. Kept across a cool, so the dropdown still has it.
     @Published public private(set) var lens: LensReport?
+    /// Every app-managed hit of the last lens walk, of any size and uncapped: the `protected` set for the review sheet and
+    /// the Trasher. `lens` keeps only the hits big enough to show.
+    public private(set) var protectedHits: [LensHit] = []
     @Published public var period: Int = 7 {
         didSet {
             guard period != oldValue else { return }
@@ -48,6 +51,11 @@ public final class DriveController: ObservableObject {
     /// Orders lens walks: only a walk started after the one that set `lens` may replace it.
     private var lensRequests = 0
     private var lensApplied = 0
+    /// Set when an unmount begins; read off main by a trash in progress, so it stops between items.
+    private let stopFlag = OSAllocatedUnfairLock(initialState: false)
+    nonisolated var stopRequested: Bool { stopFlag.withLock { $0 } }
+    /// Tests only: the `protected` set the last trash used.
+    private(set) var lastProtected: [LensHit] = []
     private static let log = Logger(subsystem: AppIdentity.bundleID, category: "index")
     /// Tests only: runs between a map build's index read and its unmount check.
     var afterMapRead: (() async -> Void)?
@@ -102,6 +110,7 @@ public final class DriveController: ObservableObject {
     /// do nothing.
     public func willUnmount() async {
         unmounting = true
+        stopFlag.withLock { $0 = true }
         activity = .offline
         opening?.cancel()
         await run { await self.coolBody() }
@@ -164,13 +173,22 @@ public final class DriveController: ObservableObject {
         lensRequests += 1
         let request = lensRequests
         let start = ContinuousClock.now
-        guard let report = try? await index.read({ LensMatcher.report(index: $0, rules: .bundled, generation: gen) }) else { return }
+        // One uncapped walk: the shown report is its large hits, the protected set all its app-managed ones.
+        guard let all = try? await index.read({ LensMatcher.report(index: $0, rules: .bundled, generation: gen, minBytes: 0, limit: .max) })
+        else { return }
+        let report = LensReport(hits: Array(all.hits.lazy.filter { $0.size >= Self.lensMinBytes }.prefix(Self.lensLimit)),
+                                generation: gen)
         let ms = (ContinuousClock.now - start) / .milliseconds(1)
         Self.log.info("lens report: \(report.hits.count) hits in \(Int(ms)) ms")
         guard request > lensApplied else { return }
         lensApplied = request
         lens = report
+        protectedHits = all.hits.filter { $0.safety == .appManaged }
     }
+
+    /// What the shown report keeps (LensMatcher's defaults).
+    private static let lensMinBytes: UInt64 = 1_000_000
+    private static let lensLimit = 2_000
 
     /// Moves `items` (the ones checked in the review sheet) to the Trash, then relists their folders and recounts at once.
     /// Runs on the lifecycle chain, so it never races a cool or an unmount; a drive that is unmounting or cold moves nothing.
@@ -179,13 +197,21 @@ public final class DriveController: ObservableObject {
     }
 
     private func trashBody(_ items: [BasketItem], backend: some TrashBackend) async -> TrashOutcome {
-        let protected = lens?.hits.filter { $0.safety == .appManaged } ?? []
+        // The protected set must match the current index: wait for the walk started by warm, then walk again if the
+        // index has changed since (a no-op otherwise).
+        await lensTask?.value
+        if !unmounting { await refreshLens() }
+        let protected = protectedHits
+        lastProtected = protected
         guard !unmounting, let index else { return .driveGone(items, protected: protected) }
         // The realpath'd root the index was opened with (C7).
         guard let root = try? await index.read({ $0.rootPath }) else { return .driveGone(items, protected: protected) }
         let outcome = await Trasher.moveToTrash(items, root: root, protected: protected, expectedDevice: volume.device,
+                                                shouldStop: { [stopFlag] in stopFlag.withLock { $0 } },
                                                 backend: backend)
-        guard !outcome.cleared.isEmpty else { return outcome }
+        // An unmount that began during the moves: the index is about to close, so skip the relist, recount and lens walk
+        // (the journal brings the changes in on the next mount) and let the eject go ahead.
+        guard !unmounting, !outcome.cleared.isEmpty else { return outcome }
         var userTrash: String?
         if volume.isInternalData {
             // On the Data volume the items land in the user's Trash; relist it too when it is indexed (C8).
@@ -198,7 +224,9 @@ public final class DriveController: ObservableObject {
                      rescanSubtree: false, historyLost: false)
         }
         try? await index.apply(changes)
+        guard !unmounting else { return outcome }
         await refresh()
+        guard !unmounting else { return outcome }
         await refreshLens(force: true)
         return outcome
     }

@@ -246,3 +246,16 @@ struct RootRemovingTrash: TrashBackend {
     let (out, _) = try await trash([item("usr", 1, folder: true), item("Users/u/Library/CloudStorage", 1, folder: true)], in: root)
     #expect(out.moved.isEmpty && out.failures.map(\.reason) == Array(repeating: .failed(ReviewSheet.structuralReason), count: 2))
 }
+
+@Test func aStopRequestFailsTheRestAsDriveGone() async throws {
+    let root = try Fixtures.tree(["a.bin": 1_000, "b.bin": 1_000, "c.bin": 1_000])
+    let rootPath = Fixtures.realPath(root)
+    let bin = try Fixtures.tempDir()
+    // Stops once a.bin has left the root.
+    let out = await Trasher.moveToTrash([item("a.bin", 1), item("b.bin", 2), item("c.bin", 3)], root: rootPath, protected: [],
+                                        rules: .bundled, shouldStop: { !FileManager.default.fileExists(atPath: rootPath + "/a.bin") },
+                                        backend: FixtureTrash(bin: bin))
+    #expect(out.moved == ["a.bin"] && out.freed == 1)
+    #expect(out.failures.map(\.path) == ["b.bin", "c.bin"] && out.failures.map(\.reason) == [.driveGone, .driveGone])
+    #expect(FileManager.default.fileExists(atPath: rootPath + "/b.bin") && FileManager.default.fileExists(atPath: rootPath + "/c.bin"))
+}

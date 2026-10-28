@@ -112,16 +112,20 @@ public enum Trasher {
     /// `root` must be the drive's resolved root (`realpath`). Every item passes the review sheet's own refusal check again here,
     /// with `rules`, so app-managed locations are refused even when `protected` (the drive's app-managed hits) is empty or stale:
     /// an app-managed item is skipped silently, and a system folder or a folder that holds or could hold an app-managed
-    /// location fails without moving. With `expectedDevice`, a root on any other device moves nothing. The moves run off main.
+    /// location fails without moving. With `expectedDevice`, a root on any other device moves nothing. `shouldStop` is asked
+    /// before each item (an unmount has begun); once true, that item and the rest fail as `.driveGone`. The moves run off main.
     public static func moveToTrash(_ items: [BasketItem], root: String, protected: [LensHit], rules: LensRules = .bundled,
-                                   expectedDevice: dev_t? = nil, backend: some TrashBackend) async -> TrashOutcome {
+                                   expectedDevice: dev_t? = nil, shouldStop: @escaping @Sendable () -> Bool = { false },
+                                   backend: some TrashBackend) async -> TrashOutcome {
         await Task.detached(priority: .utility) {
-            move(items, root: root, protected: protected, rules: rules, expectedDevice: expectedDevice, backend: backend, stat: realStat)
+            move(items, root: root, protected: protected, rules: rules, expectedDevice: expectedDevice, shouldStop: shouldStop,
+                 backend: backend, stat: realStat)
         }.value
     }
 
     static func move(_ items: [BasketItem], root: String, protected: [LensHit], rules: LensRules, expectedDevice: dev_t?,
-                     backend: some TrashBackend, stat statFn: (String) -> StatResult) -> TrashOutcome {
+                     shouldStop: () -> Bool = { false }, backend: some TrashBackend,
+                     stat statFn: (String) -> StatResult) -> TrashOutcome {
         let base = TrashPath.trimmed(root)
         // nil: moved. Paths absent from `results` were skipped silently.
         var results: [String: TrashFailure?] = [:]
@@ -158,7 +162,7 @@ public enum Trasher {
         for item in outers {
             // The root is checked before every item, so an ejected or replaced drive fails the rest as gone, not as already gone.
             // Once gone, it stays gone for this request, even if something comes back at that path.
-            guard !gone, let device, let resolvedRoot, expectedDevice == nil || expectedDevice == device, rootDevice() == device else {
+            guard !gone, !shouldStop(), let device, let resolvedRoot, expectedDevice == nil || expectedDevice == device, rootDevice() == device else {
                 gone = true
                 results[item.path] = .some(.driveGone)
                 continue

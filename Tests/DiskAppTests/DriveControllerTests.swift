@@ -282,3 +282,64 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
     #expect(DriveController.foldersToRelist(cleared: ["Users/u/x"], userTrash: "Users/u/.Trash") == ["Users/u", "Users/u/.Trash"])
     #expect(DriveController.foldersToRelist(cleared: [], userTrash: "Users/u/.Trash").isEmpty)
 }
+
+// App-managed hits of any size are protected, not just the ones big enough to show; a trash right after warm waits for them.
+@MainActor @Test func smallAppManagedHitsAreProtectedWithoutARace() async throws {
+    let spec = ["Users/u/Library/Developer/CoreSimulator/dev/x.bin": 100_000,
+                "Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000]
+    let root = try Fixtures.tree(spec)
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.warm()
+    await c.lensSettled()
+    #expect(c.protectedHits.map(\.path) == ["Users/u/Library/Developer/CoreSimulator"])
+    #expect(c.lens?.hits.contains { $0.ruleID == "simulator-devices" } == false)
+    await c.cool()
+
+    let fresh = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await fresh.warm()
+    // No lensSettled(): the trash itself must wait for the walk.
+    _ = await fresh.trash([], backend: FixtureTrash(bin: try Fixtures.tempDir()))
+    #expect(fresh.lastProtected.map(\.path) == ["Users/u/Library/Developer/CoreSimulator"])
+    await fresh.cool()
+}
+
+/// Moves with `FixtureTrash`, and after the first item starts an unmount and waits until it is requested.
+private struct UnmountingTrash: TrashBackend {
+    let inner: FixtureTrash
+    let controller: DriveController
+    let calls = Counter()
+
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock(); private var n = 0
+        func next() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n }
+    }
+
+    func trash(_ url: URL) throws {
+        try inner.trash(url)
+        guard calls.next() == 1 else { return }
+        let c = controller
+        Task { @MainActor in await c.willUnmount() }
+        let deadline = Date.now.addingTimeInterval(5)
+        while !c.stopRequested && Date.now < deadline { usleep(1_000) }
+    }
+}
+
+// An unmount during a trash stops it between items and skips the relist, recount and lens walk.
+@MainActor @Test func unmountDuringTrashStopsBetweenItems() async throws {
+    let root = try Fixtures.tree(["Users/u/Library/Developer/Xcode/DerivedData/App/x.bin": 3_000_000,
+                                  "Users/u/Documents/b/y.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.warm()
+    await c.lensSettled()
+    let before = c.summary?.scannedBytes
+    let items = c.lens!.hits.map(BasketItem.from(hit:)) +
+        [BasketItem(path: "Users/u/Documents/b", name: "b", size: 2_000_000, kind: nil, isFolder: true, ruleID: nil, safety: nil)]
+    let out = await c.trash(items, backend: UnmountingTrash(inner: FixtureTrash(bin: try Fixtures.tempDir()), controller: c))
+    #expect(out.moved == ["Users/u/Library/Developer/Xcode/DerivedData"])
+    #expect(out.failures.map(\.path) == ["Users/u/Documents/b"] && out.failures.map(\.reason) == [.driveGone])
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Documents/b/y.bin").path))
+    // Neither recounted nor re-walked.
+    #expect(c.summary?.scannedBytes == before)
+    #expect(c.lens?.hits.map(\.path) == ["Users/u/Library/Developer/Xcode/DerivedData"])
+    #expect(c.activity == .offline)
+}
