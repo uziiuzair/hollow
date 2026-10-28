@@ -241,6 +241,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let alert = NSAlert()
                 alert.messageText = "Could not eject \(name)"
                 alert.informativeText = error.localizedDescription
+                // An accessory app is not active; without this the alert opens behind other apps.
+                NSApp.activate()
                 alert.runModal()
             }
         }
@@ -287,7 +289,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setPeriod(_ days: Int) {
-        liveController?.period = days
+        guard let c = liveController else { rebuild(); return }
+        c.period = days
+        // Reopens the index if the panel stayed open past the cool-down, so the new
+        // period is not shown from a stale cache.
+        Task { await c.warm() }
         rebuild()
     }
 
@@ -320,6 +326,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPanel(keepOpen: Bool) {
+        // hidesOnDeactivate hides the panel without onDismiss; drop what the last showing
+        // left behind so timers and monitors never stack.
+        clearPanelTimers()
         #if DEBUG
         let clock = ContinuousClock()
         let started = clock.now
@@ -361,7 +370,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func panelDismissed() {
         lastDismiss = Date()
+        clearPanelTimers()
+    }
+
+    private func clearPanelTimers() {
         clockTimer?.invalidate(); clockTimer = nil
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
+    }
+
+    // MARK: Quit
+
+    private var terminating = false
+    private var terminationReplied = false
+
+    /// Spec 6.4 records history at app quit: cool every controller so each open index
+    /// records today's snapshot and saves, waiting at most 3 seconds.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminating else { return .terminateLater }
+        terminating = true
+        let all = Array(controllers.values)
+        Task { [weak self] in
+            await withTaskGroup(of: Void.self) { group in
+                for c in all { group.addTask { await c.cool() } }
+            }
+            self?.finishTermination()
+        }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            self?.finishTermination()
+        }
+        return .terminateLater
+    }
+
+    private func finishTermination() {
+        guard !terminationReplied else { return }
+        terminationReplied = true
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 }
