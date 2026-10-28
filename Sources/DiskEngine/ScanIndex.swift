@@ -15,7 +15,8 @@ public final class ScanIndex {
     public let files: FileTable
     public internal(set) var top = TopFiles()
     var folderNames = NamePool()
-    var seenHardLinks: Set<UInt64> = []
+    /// Hard-linked inodes and the folder that counts them.
+    var hardLinkOwners: [UInt64: FolderID] = [:]
 
     /// The scanned folder's real path (symlinks resolved).
     public var rootPath = ""
@@ -52,7 +53,8 @@ public final class ScanIndex {
         self.files = files
     }
 
-    /// Records one directory listing and returns the new subfolders to scan.
+    /// Records one directory listing of a never-listed (or reset) folder and returns
+    /// the new subfolders to scan.
     public func integrate(_ listing: DirectoryListing, rootDevice: Int32) throws -> [FolderID] {
         let id = Int(listing.folder)
         switch listing.outcome {
@@ -70,47 +72,187 @@ public final class ScanIndex {
 
         var newFolders: [FolderID] = []
         var direct: UInt64 = 0
-        folders[id].firstChildFolder = FolderID(folders.count)
+        var pass: Set<UInt64> = []
         folders[id].firstFile = FileIndex(files.count)
 
         for entry in listing.entries {
             if entry.kind == .directory {
                 guard shouldDescend(entryDevice: entry.device, rootDevice: rootDevice, isMountPoint: entry.isMountPoint) else { continue }
                 // Directory hard links (HFS+ Time Machine backups): walk each once.
-                if entry.linkCount > 1, !seenHardLinks.insert(entry.inode).inserted { continue }
+                if entry.linkCount > 1, !claimHardLink(entry.inode, for: listing.folder, pass: &pass) { continue }
                 newFolders.append(FolderID(folders.count))
                 folders.append(FolderRecord(parent: listing.folder, nameOffset: folderNames.append(entry.name)))
                 continue
             }
-
-            var flags = entry.flags
-            if entry.linkCount > 1 {
-                guard seenHardLinks.insert(entry.inode).inserted else { continue }
-                flags.insert(.hardLinked)
-            }
-
-            direct += entry.allocated
-            if entry.allocated >= Self.bigFileThreshold {
-                let record = FileRecord(
-                    allocated: entry.allocated, parent: listing.folder, nameOffset: 0,
-                    logicalKiB: UInt32(min(entry.logical / 1024, UInt64(UInt32.max))),
-                    flags: flags, kind: entry.kind.rawValue)
-                let index = try files.append(name: entry.name, record: record)
-                top.offer(index, allocated: entry.allocated)
-                folders[id].bigFileCount += 1
-            } else {
-                folders[id].smallFileCount += 1
-                folders[id].smallAllocated += entry.allocated
-            }
+            direct += try addFile(entry, to: listing.folder, pass: &pass)
         }
-        folders[id].childFolderCount = UInt32(newFolders.count)
+        link(newFolders, under: listing.folder)
+        addToTotals(from: listing.folder, Int64(bitPattern: direct))
+        return newFolders
+    }
 
-        var cursor = listing.folder
+    /// Re-reads one already-listed folder's direct contents. Subfolders that are still
+    /// there keep their IDs and subtrees; new ones are returned for scanning; gone ones
+    /// become garbage. Totals of this folder and every ancestor are corrected.
+    public func relist(_ listing: DirectoryListing) throws -> [FolderID] {
+        let folder = listing.folder
+        let id = Int(folder)
+        let old = folders[id]
+
+        var oldDirect = old.smallAllocated
+        for file in old.firstFile..<(old.firstFile + old.bigFileCount) {
+            oldDirect += try files.record(file).allocated
+        }
+        var oldChildren: [String: FolderID] = [:]
+        var child = old.firstChildFolder
+        while child != noFolder {
+            oldChildren[folderName(child)] = child
+            child = folders[Int(child)].nextSibling
+        }
+
+        garbageFiles += Int(old.bigFileCount)
+        folders[id].firstFile = FileIndex(files.count)
+        folders[id].bigFileCount = 0
+        folders[id].smallFileCount = 0
+        folders[id].smallAllocated = 0
+        folders[id].flags.remove([.unreadable, .vanished, .partial])
+        switch listing.outcome {
+        case .unreadable: folders[id].flags.insert(.unreadable)
+        case .vanished: folders[id].flags.insert(.vanished)
+        case .ok: if listing.partial { folders[id].flags.insert(.partial) }
+        }
+
+        var children: [FolderID] = []
+        var newFolders: [FolderID] = []
+        var newDirect: UInt64 = 0
+        var pass: Set<UInt64> = []
+        for entry in listing.outcome == .ok ? listing.entries : [] {
+            if entry.kind == .directory {
+                guard shouldDescend(entryDevice: entry.device, rootDevice: rootDevice, isMountPoint: entry.isMountPoint) else { continue }
+                if let kept = oldChildren.removeValue(forKey: entry.name) {
+                    children.append(kept)
+                    continue
+                }
+                if entry.linkCount > 1, !claimHardLink(entry.inode, for: folder, pass: &pass) { continue }
+                let new = FolderID(folders.count)
+                folders.append(FolderRecord(parent: folder, nameOffset: folderNames.append(entry.name)))
+                children.append(new)
+                newFolders.append(new)
+                continue
+            }
+            newDirect += try addFile(entry, to: folder, pass: &pass)
+        }
+        link(children, under: folder)
+
+        var removedTotal: UInt64 = 0
+        for gone in oldChildren.values {
+            removedTotal += folders[Int(gone)].totalAllocated
+            markGarbage(gone)
+        }
+        let delta = Int64(bitPattern: newDirect) - Int64(bitPattern: oldDirect) - Int64(bitPattern: removedTotal)
+        addToTotals(from: folder, delta)
+        return newFolders
+    }
+
+    /// Empties a folder so `integrate` can list it from scratch: its total leaves its
+    /// ancestors, and everything below it becomes garbage.
+    public func resetContents(of folder: FolderID) {
+        let id = Int(folder)
+        if folders[id].parent != noFolder {
+            addToTotals(from: folders[id].parent, -Int64(bitPattern: folders[id].totalAllocated))
+        }
+        var child = folders[id].firstChildFolder
+        while child != noFolder {
+            let next = folders[Int(child)].nextSibling
+            markGarbage(child)
+            child = next
+        }
+        garbageFiles += Int(folders[id].bigFileCount)
+        let keep = folders[id].flags.intersection(.garbage)
+        folders[id] = FolderRecord(parent: folders[id].parent, nameOffset: folders[id].nameOffset)
+        folders[id].flags = keep
+    }
+
+    /// The folder at a path relative to `rootPath` ("" is the root), or nil.
+    public func folder(atRelativePath path: String) -> FolderID? {
+        var current: FolderID = 0
+        for part in path.split(separator: "/", omittingEmptySubsequences: true) {
+            var child = folders[Int(current)].firstChildFolder
+            while child != noFolder, folderName(child) != part {
+                child = folders[Int(child)].nextSibling
+            }
+            guard child != noFolder else { return nil }
+            current = child
+        }
+        return current
+    }
+
+    // MARK: - Helpers
+
+    /// Counts a hard link once: it belongs to the first folder that claims it. It can be
+    /// claimed again once that folder is garbage, or by the same folder in a later
+    /// listing of it (a relist). `pass` holds the inodes claimed by the current listing.
+    private func claimHardLink(_ inode: UInt64, for folder: FolderID, pass: inout Set<UInt64>) -> Bool {
+        guard pass.insert(inode).inserted else { return false }
+        if let owner = hardLinkOwners[inode], owner != folder, !folders[Int(owner)].flags.contains(.garbage) {
+            return false
+        }
+        hardLinkOwners[inode] = folder
+        return true
+    }
+
+    /// Adds one non-directory entry to `folder` and returns its counted bytes.
+    private func addFile(_ entry: RawEntry, to folder: FolderID, pass: inout Set<UInt64>) throws -> UInt64 {
+        var flags = entry.flags
+        if entry.linkCount > 1 {
+            guard claimHardLink(entry.inode, for: folder, pass: &pass) else { return 0 }
+            flags.insert(.hardLinked)
+        }
+        let id = Int(folder)
+        if entry.allocated >= Self.bigFileThreshold {
+            let record = FileRecord(
+                allocated: entry.allocated, parent: folder, nameOffset: 0,
+                logicalKiB: UInt32(min(entry.logical / 1024, UInt64(UInt32.max))),
+                flags: flags, kind: entry.kind.rawValue)
+            let index = try files.append(name: entry.name, record: record)
+            top.offer(index, allocated: entry.allocated)
+            folders[id].bigFileCount += 1
+        } else {
+            folders[id].smallFileCount += 1
+            folders[id].smallAllocated += entry.allocated
+        }
+        return entry.allocated
+    }
+
+    private func link(_ children: [FolderID], under folder: FolderID) {
+        folders[Int(folder)].firstChildFolder = children.first ?? noFolder
+        for (child, next) in zip(children, children.dropFirst() + [noFolder]) {
+            folders[Int(child)].nextSibling = next
+        }
+    }
+
+    /// Adds a signed change to `folder` and every ancestor (wrapping arithmetic keeps
+    /// unsigned totals exact).
+    private func addToTotals(from folder: FolderID, _ delta: Int64) {
+        var cursor = folder
         while cursor != noFolder {
-            folders[Int(cursor)].totalAllocated += direct
+            folders[Int(cursor)].totalAllocated &+= UInt64(bitPattern: delta)
             cursor = folders[Int(cursor)].parent
         }
-        return newFolders
+    }
+
+    private func markGarbage(_ root: FolderID) {
+        var stack = [root]
+        while let folder = stack.popLast() {
+            folders[Int(folder)].flags.insert(.garbage)
+            garbageFolders += 1
+            garbageFiles += Int(folders[Int(folder)].bigFileCount)
+            var child = folders[Int(folder)].firstChildFolder
+            while child != noFolder {
+                stack.append(child)
+                child = folders[Int(child)].nextSibling
+            }
+        }
     }
 
     public func folderName(_ id: FolderID) -> String {
@@ -132,9 +274,10 @@ public final class ScanIndex {
     public func children(of folder: FolderID) throws -> [Child] {
         let record = folders[Int(folder)]
         var result: [Child] = []
-        let firstFolder = Int(record.firstChildFolder)
-        for child in firstFolder..<(firstFolder + Int(record.childFolderCount)) {
-            result.append(Child(kind: .folder(FolderID(child)), name: folderName(FolderID(child)), allocated: folders[child].totalAllocated))
+        var child = record.firstChildFolder
+        while child != noFolder {
+            result.append(Child(kind: .folder(child), name: folderName(child), allocated: folders[Int(child)].totalAllocated))
+            child = folders[Int(child)].nextSibling
         }
         let firstFile = record.firstFile
         for file in firstFile..<(firstFile + record.bigFileCount) {

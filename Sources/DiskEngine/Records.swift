@@ -13,6 +13,8 @@ public struct FolderFlags: OptionSet, Sendable {
     public static let otherDevice = FolderFlags(rawValue: 1 << 2)
     /// Some entries could not be read; the folder total may be low.
     public static let partial = FolderFlags(rawValue: 1 << 3)
+    /// No longer reachable from the root; removed at the next compaction.
+    public static let garbage = FolderFlags(rawValue: 1 << 4)
 }
 
 public struct FileFlags: OptionSet, Sendable {
@@ -25,13 +27,13 @@ public struct FileFlags: OptionSet, Sendable {
     public static let symlink = FileFlags(rawValue: 1 << 3)
 }
 
-/// One folder, 48 bytes. A folder's subfolders and stored files are contiguous,
-/// so a range (first + count) replaces linked lists.
+/// One folder, 48 bytes. Subfolders form a linked list (first child, next sibling)
+/// so folder IDs never change once assigned; stored files are one contiguous block.
 public struct FolderRecord: Sendable {
     public var parent: FolderID
     public var nameOffset: UInt32
     public var firstChildFolder: FolderID
-    public var childFolderCount: UInt32
+    public var nextSibling: FolderID
     public var firstFile: FileIndex
     public var bigFileCount: UInt32
     public var smallFileCount: UInt32
@@ -42,8 +44,8 @@ public struct FolderRecord: Sendable {
     public init(parent: FolderID, nameOffset: UInt32) {
         self.parent = parent
         self.nameOffset = nameOffset
-        firstChildFolder = 0
-        childFolderCount = 0
+        firstChildFolder = noFolder
+        nextSibling = noFolder
         firstFile = 0
         bigFileCount = 0
         smallFileCount = 0

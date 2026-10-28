@@ -9,7 +9,7 @@ public enum SnapshotError: Error {
 /// The RAM side of a `ScanIndex` in one file, replaced atomically on every save.
 ///
 /// Layout (native little-endian): magic "DINX", header fields, length-prefixed
-/// rootPath and fseventsUUID, folder records, folder name bytes, hard-link inodes,
+/// rootPath and fseventsUUID, folder records, folder name bytes, (inode, owner folder) pairs,
 /// pending folder IDs. The file table's committed lengths are in the header, so
 /// file records appended after the last save are cut off on load.
 extension ScanIndex {
@@ -36,7 +36,7 @@ extension ScanIndex {
             try put(UInt64(folderNames.byteCount))
             try put(UInt64(files.count))
             try put(files.nameBytes)
-            try put(UInt64(seenHardLinks.count))
+            try put(UInt64(hardLinkOwners.count))
             try put(UInt64(pending.count))
             try put(lastEventID)
             try put(rootDevice)
@@ -48,7 +48,10 @@ extension ScanIndex {
 
             for record in folders { try put(record) }
             try folderNames.bytes.withUnsafeBytes { _ = try out.append($0) }
-            for inode in seenHardLinks { try put(inode) }
+            for (inode, owner) in hardLinkOwners {
+                try put(inode)
+                try put(owner)
+            }
             try pending.withUnsafeBytes { _ = try out.append($0) }
             try out.sync()
         } catch {
@@ -101,7 +104,7 @@ extension ScanIndex {
             let uuid = try takeString()
 
             let expectedRest = folderCount * MemoryLayout<FolderRecord>.size + folderNameBytes
-                + hardLinkCount * 8 + pendingCount * MemoryLayout<FolderID>.size
+                + hardLinkCount * 12 + pendingCount * MemoryLayout<FolderID>.size
             guard folderCount > 0, bytes.count - cursor == expectedRest else {
                 throw SnapshotError.incompatible("length mismatch")
             }
@@ -110,8 +113,11 @@ extension ScanIndex {
             let index = ScanIndex(files: files)
             for _ in 0..<folderCount { index.folders.append(try take(FolderRecord.self)) }
             index.folderNames = NamePool(bytes: Array(try takeBytes(folderNameBytes)))
-            index.seenHardLinks.reserveCapacity(hardLinkCount)
-            for _ in 0..<hardLinkCount { index.seenHardLinks.insert(try take(UInt64.self)) }
+            index.hardLinkOwners.reserveCapacity(hardLinkCount)
+            for _ in 0..<hardLinkCount {
+                let inode = try take(UInt64.self)
+                index.hardLinkOwners[inode] = try take(FolderID.self)
+            }
             index.pending = (0..<pendingCount).map { _ in (try? take(FolderID.self)) ?? 0 }
 
             index.rootPath = rootPath
