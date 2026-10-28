@@ -1,0 +1,105 @@
+import Foundation
+import Testing
+import DiskEngine
+@testable import DiskApp
+
+func item(_ path: String, _ size: UInt64, folder: Bool = false, safety: LensSafety? = nil) -> BasketItem {
+    BasketItem(path: path, name: String(path.split(separator: "/").last ?? ""), size: size, kind: .other, isFolder: folder, ruleID: nil, safety: safety)
+}
+
+let dockerHit = LensHit(ruleID: "docker", path: "Users/u/Library/Containers/com.docker.docker", name: "com.docker.docker",
+                        size: 59_000_000_000, isFolder: true, safety: .appManaged)
+
+@MainActor @Test func nestedItemsCollapseIntoTheirFolder() {
+    let b = Basket()
+    #expect(b.add(item("a/b/c.bin", 2_000_000_000)))
+    #expect(b.add(item("a/b", 5_000_000_000, folder: true)))
+    #expect(!b.add(item("a/b/d.bin", 1_000_000_000)))
+    #expect(!b.add(item("a/b", 5_000_000_000, folder: true)))
+    #expect(!b.add(item("", 9, folder: true)) && !b.add(item("a#small", 9)) && !b.add(item("a/b#more", 9)))
+    #expect(b.add(item("a/bc", 1_000_000_000, folder: true)))
+    #expect(b.items.map(\.path) == ["a/b", "a/bc"] && b.total == 6_000_000_000)
+    #expect(b.add(item("src/C#/x.cs", 1)) && b.add(item("Issue #4.txt", 1)))
+}
+
+@MainActor @Test func chipsShowSixThenACount() {
+    let b = Basket()
+    for i in 0..<8 { b.add(item("f\(i)", 1)) }
+    #expect(b.chips.count == 6 && b.moreCount == 2)
+    b.remove(paths: ["f0", "f1"]); #expect(b.moreCount == 0)
+    b.add(contentsOf: [item("g", 1), item("g", 1)]); #expect(b.items.count == 7)
+    b.clear(); #expect(b.items.isEmpty && b.total == 0)
+}
+
+@MainActor @Test func basketStoreKeepsOneBasketPerDrive() {
+    let store = BasketStore()
+    let t7 = store.basket(for: "T7")
+    t7.add(item("a", 1))
+    #expect(store.basket(for: "T7") === t7 && store.basket(for: "I").items.isEmpty)
+    store.drop("T7")
+    #expect(t7.items.isEmpty && store.basket(for: "T7") !== t7)
+}
+
+@Test func basketItemsFromNodesAndHits() {
+    let docker = MapNode(key: "Users/u/Library/Containers/com.docker.docker/Data/Docker.raw", name: "Docker.raw", kind: .virtualMachines, growth: 0, isFolder: false)
+    #expect(BasketItem.from(node: docker, size: 59_000_000_000)?.safety == .appManaged)
+    #expect(BasketItem.from(node: MapNode(key: "a#small", name: "3 small files", kind: nil, growth: 0, isFolder: false), size: 9) == nil)
+    #expect(BasketItem.from(node: MapNode(key: "", name: "Macintosh HD", kind: .other, growth: 0, isFolder: true), size: 9) == nil)
+    let hit = LensHit(ruleID: "node-modules", path: "Users/u/web/node_modules", name: "node_modules", size: 2_700_000, isFolder: true, safety: .regenerates)
+    #expect(BasketItem.from(hit: hit) == BasketItem(path: "Users/u/web/node_modules", name: "node_modules", size: 2_700_000,
+                                                    kind: .developer, isFolder: true, ruleID: "node-modules", safety: .regenerates))
+}
+
+@Test func aParentOfAContentsRuleIsNotAKnownItem() {
+    let caches = MapNode(key: "Users/u/Library/Caches", name: "Caches", kind: .caches, growth: 0, isFolder: true)
+    let yarn = MapNode(key: "Users/u/Library/Caches/Yarn", name: "Yarn", kind: .caches, growth: 0, isFolder: true)
+    #expect(BasketItem.from(node: caches, size: 1)?.safety == nil && BasketItem.from(node: caches, size: 1)?.ruleID == nil)
+    #expect(BasketItem.from(node: yarn, size: 1)?.safety == .regenerates && BasketItem.from(node: yarn, size: 1)?.ruleID == "yarn-cache")
+}
+
+@Test func reviewRowsShowCheckboxesExceptForAppManaged() {
+    let items = [
+        BasketItem(path: "Users/u/Library/Developer/Xcode/DerivedData", name: "DerivedData", size: 6_200_000_000, kind: .developer, isFolder: true, ruleID: "xcode-derived-data", safety: .regenerates),
+        BasketItem(path: "Users/u/Library/Containers/com.docker.docker/Data/Docker.raw", name: "Docker.raw", size: 59_000_000_000, kind: .virtualMachines, isFolder: false, ruleID: "docker", safety: .appManaged),
+        BasketItem(path: "Users/u/Movies/old.mov", name: "old.mov", size: 2_000_000_000, kind: .media, isFolder: false, ruleID: nil, safety: nil),
+        BasketItem(path: "Users/u/Downloads/Setup.dmg", name: "Setup.dmg", size: 300_000_000, kind: .other, isFolder: false, ruleID: "old-installers", safety: .review),
+        BasketItem(path: "notes.txt", name: "notes.txt", size: 1, kind: .other, isFolder: false, ruleID: nil, safety: nil),
+    ]
+    let s = ReviewSheet.make(items: items, unchecked: ["Users/u/Movies/old.mov", "Users/u/Downloads/Setup.dmg", "notes.txt"],
+                             protected: [], driveName: "Macintosh HD", driveConnected: true)
+    #expect(s.rows.map(\.isCheckable) == [true, false, true, true, true] && s.rows.map(\.isChecked) == [true, false, false, false, false])
+    #expect(s.rows[0].explanation == "Xcode build products. Safe to clear. Rebuilds itself." && s.rows[0].location == "Users/u/Library/Developer/Xcode")
+    #expect(s.rows[0].size == "6.2 GB" && s.rows[0].instruction == nil)
+    #expect(s.rows[1].instruction == "Reclaim space in Docker \u{203A} Settings \u{203A} Resources.")
+    #expect(s.rows[2].explanation == "Not a known item. Make sure you don't need it.")
+    #expect(s.rows[3].explanation == "An installer you downloaded over a month ago. Once the app is installed, you don't need it.")
+    #expect(s.rows[4].location == "Drive root")
+    #expect(s.buttonTitle == "Move 1 item to Trash" && s.canTrash && s.selectedTotal == 6_200_000_000 && s.selectedLabel == "6.2 GB selected")
+    #expect(s.notice == nil)
+    #expect(ReviewSheet.trashable(items, unchecked: [], protected: []).map(\.name) == ["DerivedData", "old.mov", "Setup.dmg", "notes.txt"])
+    #expect(ReviewSheet.make(items: items, unchecked: [], protected: [], driveName: "M", driveConnected: true).buttonTitle == "Move 4 items to Trash")
+}
+
+@Test func disconnectedDriveCannotTrash() {
+    let s = ReviewSheet.make(items: [item("a.bin", 5)], unchecked: [], protected: [], driveName: "Samsung T7", driveConnected: false)
+    #expect(!s.canTrash && s.notice == "Samsung T7 is disconnected. Plug it back in to move these items.")
+    #expect(ReviewSheet.make(items: [item("a.bin", 5)], unchecked: ["a.bin"], protected: [], driveName: "T7", driveConnected: true).buttonTitle == "Move to Trash")
+}
+
+@Test func folderContainingAppManagedItemIsRefusedInReview() {
+    let items = [item("Users", 80_000_000_000, folder: true), item("Users/u/Library/Containers/com.docker.docker", 59_000_000_000, folder: true),
+                 item("Users/u/Library/Containers/com.docker.docker/Data/Docker.raw", 1), item("Users/u/Library/Containers/com.dockerx", 1, folder: true)]
+    let s = ReviewSheet.make(items: items, unchecked: [], protected: [dockerHit], driveName: "Macintosh HD", driveConnected: true)
+    #expect(s.rows.map(\.isCheckable) == [false, false, false, true])
+    #expect(s.rows[0].instruction == "Contains Docker. Reclaim space in Docker \u{203A} Settings \u{203A} Resources.")
+    #expect(s.rows[1].instruction == "Reclaim space in Docker \u{203A} Settings \u{203A} Resources.")
+    #expect(ReviewSheet.trashable(items, unchecked: [], protected: [dockerHit]).map(\.path) == ["Users/u/Library/Containers/com.dockerx"])
+    #expect(s.buttonTitle == "Move 1 item to Trash")
+}
+
+@Test func trashPathUsesTheUserPathOnTheDataVolume() {
+    #expect(TrashPath.userPath(root: "/System/Volumes/Data", relative: "Users/u/x.bin") == "/Users/u/x.bin")
+    #expect(TrashPath.userPath(root: "/System/Volumes/Data/", relative: "Users/u/x.bin") == "/Users/u/x.bin")
+    #expect(TrashPath.userPath(root: "/Volumes/T7", relative: "a/b.bin") == "/Volumes/T7/a/b.bin")
+    #expect(TrashPath.physicalPath(root: "/System/Volumes/Data", relative: "Users/u/x.bin") == "/System/Volumes/Data/Users/u/x.bin")
+}
