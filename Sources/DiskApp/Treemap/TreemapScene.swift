@@ -11,7 +11,8 @@ public struct BlockInstance: Equatable, Sendable {
     public var stripe: Float
     /// Index of the depth-1 ancestor.
     public var topLevel: Int32
-    /// Bit 0: top-level block. Bit 1: bucket (small files or "N more items").
+    /// Bit 0: top-level block. Bit 1: bucket (small files or "N more items"). Bit 2: the growth
+    /// strip of a folder with children, drawn over them (transparent but for the strip).
     public var flags: UInt32
     public var pad: Float
 
@@ -26,6 +27,7 @@ public struct BlockInstance: Equatable, Sendable {
 
     public static let topLevelFlag: UInt32 = 1
     public static let bucketFlag: UInt32 = 2
+    public static let stripFlag: UInt32 = 4
 }
 
 /// Per-frame values. Field for field the same as `Uniforms` in `TreemapScene.shaderSource` (stride 48).
@@ -63,11 +65,14 @@ public enum TreemapScene {
     /// Growth below this draws no strip.
     public static let stripeThreshold: Int64 = 100_000_000
 
-    /// One instance per rect, in rect order (parents before children).
+    /// One instance per rect, in rect order (parents before children), then one per folder with
+    /// children that grew: its growth strip, drawn over the children along the folder's right edge,
+    /// full height. A folder's own block would have it under its children (blocks draw in order).
     public static func instances(snapshot: MapSnapshot, dark: Bool) -> [BlockInstance] {
         let layout = snapshot.layout
         let bucket: SIMD4<Float> = dark ? SIMD4(1, 1, 1, 0.22) : SIMD4(0, 0, 0, 0.22)
         var out: [BlockInstance] = []
+        var strips: [BlockInstance] = []
         out.reserveCapacity(layout.rects.count)
         for (i, r) in layout.rects.enumerated() {
             let top = r.parent < 0 ? i : (r.parent < i ? Int(out[r.parent].topLevel) : layout.topLevel(of: i))
@@ -82,13 +87,18 @@ public enum TreemapScene {
                 color = shaded(Palette.hex(node?.kind ?? .other), depth: r.depth)
             }
             let f = r.frame
-            out.append(BlockInstance(
-                rect: SIMD4(Float(f.minX), Float(f.minY), Float(f.width), Float(f.height)),
-                color: color,
-                stripe: stripe(growth: node?.growth ?? 0, size: r.size),
-                topLevel: Int32(top), flags: flags))
+            let rect = SIMD4(Float(f.minX), Float(f.minY), Float(f.width), Float(f.height))
+            let share = stripe(growth: node?.growth ?? 0, size: r.size)
+            let recursed = r.childCount > 0
+            out.append(BlockInstance(rect: rect, color: color, stripe: recursed ? 0 : share,
+                                     topLevel: Int32(top), flags: flags))
+            if recursed, share > 0 {
+                // White with no fill: the shader draws only the ruled strip.
+                strips.append(BlockInstance(rect: rect, color: SIMD4(1, 1, 1, 0), stripe: share,
+                                            topLevel: Int32(top), flags: BlockInstance.stripFlag))
+            }
         }
-        return out
+        return out + strips
     }
 
     /// The kind's color, 10 points darker per level below 1, never below 0.7.
@@ -118,7 +128,8 @@ public enum TreemapScene {
         fills.reserveCapacity(instances.count)
         var out: [Bool] = []
         out.reserveCapacity(instances.count)
-        for (i, inst) in instances.enumerated() {
+        // The strip pass after the rects has no labels.
+        for (i, inst) in instances.prefix(layout.rects.count).enumerated() {
             let p = i < layout.rects.count ? layout.rects[i].parent : -1
             let under = p >= 0 && p < fills.count ? fills[p] : window
             let c = inst.color

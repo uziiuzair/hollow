@@ -83,3 +83,29 @@ private func snap(_ rects: [TreemapRect], _ nodes: [MapNode], top: Int) -> MapSn
 @Test func lightModeOutlineGetsAnInkRing() {
     #expect(TreemapScene.outlineRing(dark: false) == 1 && TreemapScene.outlineRing(dark: true) == 0)
 }
+
+// A recursed folder's growth strip is drawn after every block, so its children don't cover it:
+// along the folder's right edge, full height, white over whatever is under it.
+@Test func recursedFolderStripDrawsOverItsChildren() {
+    var folder = rect(.folder(1), 4_000_000_000, depth: 1, parent: -1)
+    folder.frame = CGRect(x: 10, y: 20, width: 300, height: 200)
+    folder.firstChild = 2; folder.childCount = 1; folder.hasHeader = true
+    var leaf = rect(.folder(2), 2_000_000_000, depth: 1, parent: -1)
+    leaf.frame = CGRect(x: 320, y: 20, width: 100, height: 200)
+    var child = rect(.file(0), 4_000_000_000, depth: 2, parent: 0)
+    child.frame = CGRect(x: 11, y: 69, width: 298, height: 150)
+    let s = snap([folder, leaf, child],
+                 [MapNode(key: "a", name: "a", kind: .apps, growth: 1_000_000_000, isFolder: true),
+                  MapNode(key: "b", name: "b", kind: .apps, growth: 500_000_000, isFolder: true),
+                  MapNode(key: "a/f", name: "f", kind: .apps, growth: 1_000_000_000, isFolder: false)], top: 2)
+    let i = TreemapScene.instances(snapshot: s, dark: true)
+    #expect(i.count == 4)
+    // The folder block itself carries no strip; its child and the leaf folder keep theirs.
+    #expect(i[0].stripe == 0 && i[1].stripe == 0.25 && i[2].stripe == 0.25)
+    let strip = i[3]
+    #expect(strip.rect == SIMD4<Float>(10, 20, 300, 200) && strip.stripe == 0.25)
+    #expect(strip.color == SIMD4<Float>(1, 1, 1, 0) && strip.topLevel == 0)
+    #expect(strip.flags & BlockInstance.topLevelFlag == 0 && strip.flags & BlockInstance.stripFlag != 0)
+    // Label ink is per rect; the strip pass adds no labels.
+    #expect(TreemapScene.darkLabels(instances: i, layout: s.layout, dark: true).count == 3)
+}
