@@ -20,7 +20,7 @@ extension ScanIndex {
     public func save(to directory: URL) throws {
         try files.sync()
         let finalURL = directory.appending(path: Self.snapshotName)
-        let tempURL = directory.appending(path: Self.snapshotName + ".tmp")
+        let tempURL = directory.appending(path: "\(Self.snapshotName).\(UUID().uuidString).tmp")
         do {
             let out = try MappedAppendFile(url: tempURL)
             func put<T>(_ value: T) throws { try withUnsafeBytes(of: value) { _ = try out.append($0) } }
