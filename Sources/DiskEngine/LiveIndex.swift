@@ -157,6 +157,11 @@ public actor LiveIndex {
     /// Folders whose listing hung or was skipped, by absolute path, and when to list them again. Not deferred changes:
     /// their events count as applied (with what the folder had), so they never hold back the stored event ID.
     private var staleRetry: [String: ContinuousClock.Instant] = [:]
+    /// One locked section of stale retries lists for about this long, then lets go of the lock and goes on in the next.
+    private var staleBudget: Duration = .seconds(2)
+    /// While set, an apply relists no folder once this has passed; the folders it didn't reach go in `budgetLeftover`.
+    private var listingBudget: ContinuousClock.Instant?
+    private var budgetLeftover: [String] = []
     private var lister = DirectoryLister.shared
     /// The QoS listings run at: userInitiated (open, exclusions, the unreadable retry, which someone waits for), and
     /// utility while an apply from the watcher or the flush timer holds the lock.
@@ -509,12 +514,13 @@ public actor LiveIndex {
         scheduleFlush()
     }
 
-    /// Applies the deferred changes whose window has passed. Called by the flush timer, and by tests. Like `enqueue`,
-    /// one locked section from choosing the changes to applying them.
+    /// Applies the deferred changes whose window has passed, then retries the stale folders that are due. Called by the
+    /// flush timer, and by tests. Like `enqueue`, one locked section from choosing the deferred changes to applying them.
+    /// The stale retries follow in sections of their own, each at most `staleChunk` folders and about `staleBudget` of
+    /// listing, so thousands of them (a drained pool coming back) never hold the lock for minutes.
     func flushDue() async {
         await lock()
-        defer { unlock() }
-        guard !closed else { return }
+        guard !closed else { unlock(); return }
         let now = self.now()
         var due: [FSChange] = []
         for (key, entry) in coalesced where entry.waiting != nil && now - entry.last >= entry.window {
@@ -524,15 +530,41 @@ public actor LiveIndex {
             applyAgain(&entry, at: now)
             coalesced[key] = entry
         }
-        // ID 0: a retry moves the stored event ID nowhere.
-        for (path, at) in staleRetry where at <= now {
-            staleRetry[path] = nil
-            due.append(FSChange(path: path, id: 0, rescanSubtree: false, historyLost: false))
-        }
         if let applied = due.map(\.id).max() {
             try? await applyHoldingLock(due, advanceTo: min(applied, deferredFloor), routed: true, background: true)
         }
+        unlock()
+        await retryDueStale()
+        await lock()
+        defer { unlock() }
+        guard !closed else { return }
         scheduleFlush()
+    }
+
+    /// At most this many stale folders per locked section.
+    static let staleChunk = 2_000
+
+    /// Retries the stale folders that are due, a chunk per locked section. A chunk's folders not reached within the
+    /// budget stay due now, for the next chunk. ID 0: a retry moves the stored event ID nowhere and holds back nothing.
+    private func retryDueStale() async {
+        while true {
+            await lock()
+            guard !closed, index != nil else { unlock(); return }
+            let now = self.now()
+            let paths = staleRetry.filter { $0.value <= now }.keys.sorted().prefix(Self.staleChunk)
+            guard !paths.isEmpty else { unlock(); return }
+            for path in paths { staleRetry[path] = nil }
+            let due = paths.map { FSChange(path: $0, id: 0, rescanSubtree: false, historyLost: false) }
+            listingBudget = ContinuousClock.now + staleBudget
+            defer { listingBudget = nil }
+            try? await applyHoldingLock(due, advanceTo: 0, routed: true, background: true)
+            let leftover = budgetLeftover
+            budgetLeftover = []
+            for path in leftover { staleRetry[path] = self.now() }
+            unlock()
+            // Whoever waited for the lock (a map build, a trash, a close) has had it; then the next chunk.
+            await Task.yield()
+        }
     }
 
     /// A folder applied again with a change since its last apply: once it has been `backoffAfter` times in a row, its
@@ -744,6 +776,11 @@ public actor LiveIndex {
                 toScan += try index.integrate(listing, rootDevice: index.rootDevice)
             }
             for folder in relists where !index.folders[Int(folder)].flags.contains(.garbage) && !rebuilt.contains(folder) {
+                if let budget = listingBudget, ContinuousClock.now >= budget {
+                    // Out of budget: left as it was, and retried in the next locked section.
+                    budgetLeftover.append(index.path(of: folder, rootPath: index.rootPath))
+                    continue
+                }
                 #if DEBUG
                 let started = ContinuousClock.now
                 #endif
@@ -841,6 +878,25 @@ public actor LiveIndex {
 
     /// Tests only: how many folders the coalescing table tracks.
     func trackedFolders() -> Int { coalesced.count }
+
+    /// Test hook: marks these folders (relative paths) stale and due for a retry now, as a skipped listing would.
+    func markStaleForRetry(_ relative: [String]) {
+        guard let index else { return }
+        for path in relative {
+            guard let folder = index.folder(atRelativePath: path) else { continue }
+            index.markStale(folder)
+            staleRetry[index.path(of: folder, rootPath: index.rootPath)] = now()
+        }
+        index.newlyStale = []
+    }
+
+    /// Test hook: how long one locked section of stale retries may list for.
+    func injectStaleBudget(_ budget: Duration) {
+        staleBudget = budget
+    }
+
+    /// Tests only: stale folders waiting for a retry.
+    func staleRetryCount() -> Int { staleRetry.count }
 
     /// Test hook: the clock the coalescing window is measured with.
     func injectClock(_ now: @escaping @Sendable () -> ContinuousClock.Instant) {

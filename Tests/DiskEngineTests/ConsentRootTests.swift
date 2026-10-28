@@ -112,3 +112,34 @@ private func name(_ outcome: DirectoryLister.Outcome) -> String {
     #expect(roots.root(of: "/Users/u") == nil)
     #expect(roots.root(of: "/Library/Caches") == nil)
 }
+
+// Final review I2 (b): thousands of stale folders due at once (a drained pool coming back) are retried in chunks, each a
+// locked section of about the stale budget, so a read goes between them; retries never move the stored event ID.
+@Test func staleRetriesLetGoOfTheLockBetweenChunks() async throws {
+    var spec: [String: Int] = [:]
+    for i in 0..<30 { spec["d\(i)/f.bin"] = 10 }
+    let root = try Fixtures.tree(spec)
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir())
+    await live.disableWatcher()
+    _ = try await live.open()
+    let listed = OSAllocatedUnfairLock(initialState: 0)
+    await live.injectLister(DirectoryLister(read: { path, folder, progress in
+        usleep(25_000)
+        listed.withLock { $0 += 1 }
+        return DirectoryLister.read(path, folder, progress)
+    }))
+    await live.injectStaleBudget(.milliseconds(100))
+    let eventID = await live.withIndex { $0.lastEventID }
+    await live.markStaleForRetry((0..<30).map { "d\($0)" })
+
+    let flush = Task { await live.flushDue() }
+    for _ in 0..<500 where listed.withLock({ $0 }) == 0 { try await Task.sleep(for: .milliseconds(2)) }
+    let seenByRead = try await live.read { _ in listed.withLock { $0 } }
+    await flush.value
+    #expect(seenByRead < 30, "the read waited for all \(seenByRead) relists")
+    #expect(listed.withLock { $0 } >= 30)
+    #expect(await live.staleRetryCount() == 0)
+    #expect(try await live.read { index in (0..<30).allSatisfy { !index.folders[Int(index.folder(atRelativePath: "d\($0)")!)].flags.contains(.stale) } })
+    #expect(await live.withIndex { $0.lastEventID } == eventID)
+    try await live.close()
+}
