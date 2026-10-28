@@ -135,3 +135,13 @@ import Testing
     #expect(src.builds == builds && src.holds == 0 && m.status == .offline)
 }
 
+// Reopening over a visible map keeps it ready instead of flashing "Loading".
+@MainActor @Test func reopenOverAVisibleMapKeepsReady() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000, "b/g.bin": 1_200_000]); let m = model(src)
+    await m.open(path: "", select: nil); await m.settle()
+    await m.open(path: "", select: "b")
+    #expect(m.status == .ready)
+    await m.settle()
+    #expect(m.status == .ready && m.snapshot?.nodes[m.selected!].key == "b")
+}
+

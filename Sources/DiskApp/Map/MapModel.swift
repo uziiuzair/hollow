@@ -91,7 +91,8 @@ public final class MapModel: ObservableObject {
         selectedKey = key
         selected = nil
         pendingZoom = nil
-        status = Self.coldStatus(source.activity)
+        // A reopen over a visible map keeps it until the new build lands.
+        if snapshot == nil { status = Self.coldStatus(source.activity) }
         if !isOpen {
             isOpen = true
             session += 1
