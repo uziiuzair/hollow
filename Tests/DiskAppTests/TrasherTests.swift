@@ -203,7 +203,42 @@ struct RootRemovingTrash: TrashBackend {
 @Test func caseVariantsInOneRequestAreCountedOnce() async throws {
     let root = try Fixtures.tree(["a/b.bin": 1_000])
     let (out, _) = try await trash([item("A/b.bin", 1), item("a", 10, folder: true), item("A", 10, folder: true)], in: root)
-    #expect(out.freed == 10 && out.failures.isEmpty && out.moved == ["A/b.bin", "a", "A"])
+    #expect(out.freed == 10 && out.moved == ["a"])
+    // "A/b.bin" is inside "A" (exact paths); "A" is the folder "a" already moved, so both are already gone, and nothing counts twice.
+    #expect(out.failures == [.init(path: "A/b.bin", name: "b.bin", reason: .alreadyGone), .init(path: "A", name: "A", reason: .alreadyGone)])
+}
+
+@Test func aNameThatOnlyFoldsToTheRealOneIsRefused() async throws {
+    let root = try Fixtures.tree(["Users/u/Documents/a.txt": 10, "Users/u/Library/Containers/b.bin": 10])
+    let (out, _) = try await trash([item("Users/u/Document\u{17F}", 1, folder: true), item("Users/u/Library/Container\u{17F}", 1, folder: true)],
+                                   in: root, protected: [])
+    #expect(out.moved.isEmpty && out.failures.map(\.reason) == [.outsideDrive, .outsideDrive])
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Documents/a.txt").path))
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Library/Containers/b.bin").path))
+}
+
+@Test func aCaseVariantOfTheRealPathIsRefused() async throws {
+    let root = try Fixtures.tree(["Users/u/Documents/x": 10, "Users/u/Documents/y": 10])
+    let (out, _) = try await trash([item("users/u/documents/x", 1), item("Users/u/Documents/Y", 1)], in: root)
+    #expect(out.moved.isEmpty && out.failures.map(\.reason) == [.outsideDrive, .outsideDrive])
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Documents/x").path))
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "Users/u/Documents/y").path))
+}
+
+@Test func aCanonicallyEquivalentNameStillMoves() async throws {
+    let root = try Fixtures.tree(["d/caf\u{E9}.txt": 10])
+    let (out, _) = try await trash([item("d/cafe\u{301}.txt", 1)], in: root)
+    #expect(out.moved == ["d/cafe\u{301}.txt"] && out.failures.isEmpty)
+}
+
+@Test func aSymlinkItemMovesAsTheLink() async throws {
+    let root = try Fixtures.tree(["d/target.bin": 10])
+    try FileManager.default.createSymbolicLink(atPath: Fixtures.realPath(root) + "/d/link", withDestinationPath: "target.bin")
+    let (out, bin) = try await trash([item("d/link", 1)], in: root)
+    #expect(out.moved == ["d/link"] && out.failures.isEmpty)
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "d/target.bin").path))
+    let moved = try FileManager.default.contentsOfDirectory(atPath: bin.path)
+    #expect(moved.count == 1 && (try? FileManager.default.destinationOfSymbolicLink(atPath: bin.path + "/" + moved[0])) == "target.bin")
 }
 
 @Test func moreStructuralFoldersAreRefused() async throws {

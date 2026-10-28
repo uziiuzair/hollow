@@ -136,12 +136,13 @@ public enum Trasher {
             case nil: candidates.append(item)
             }
         }
-        // An item inside another item of the same request (or the same path in another case) moves with it, and its bytes
-        // count once, in the outermost item: the shortest covering path, then the first listed.
-        let lowered = candidates.map { $0.path.lowercased() }
+        // An item inside another item of the same request moves with it, and its bytes count once, in the outermost item.
+        // Paths compare exactly: `moveOne` only moves an item written exactly as it is on disk, so a case variant of an item
+        // here fails on its own rather than being counted twice.
+        let paths = candidates.map(\.path)
         func outermost(_ i: Int) -> Int {
-            lowered.indices.filter { lowered[i] == lowered[$0] || lowered[i].hasPrefix(lowered[$0] + "/") }
-                .min { (lowered[$0].count, $0) < (lowered[$1].count, $1) }!
+            paths.indices.filter { paths[i] == paths[$0] || paths[i].hasPrefix(paths[$0] + "/") }
+                .min { (paths[$0].count, $0) < (paths[$1].count, $1) }!
         }
         let outerIndex = candidates.indices.map(outermost)
         let outers = candidates.indices.filter { outerIndex[$0] == $0 }.map { candidates[$0] }
@@ -196,15 +197,25 @@ public enum Trasher {
         }
         // A different drive mounted inside the root, or anything else on another device, is not this drive.
         guard itemStat.st_dev == device else { return .outsideDrive }
-        // The parent must resolve to exactly the folder the path names: no symlink anywhere in the parent chain. Otherwise a
-        // link could lead outside the drive, or to an app-managed or system folder the checks above never saw by that name.
+        // The parent must resolve to exactly the folder the path names: no symlink anywhere in the parent chain, and the same
+        // spelling as on disk. Otherwise a link or another spelling could lead to an app-managed or system folder the checks
+        // above never saw by that name. String `==` allows canonically equivalent Unicode, nothing else.
         // Known gap (accepted): the parent could still be swapped between this check and the move. That needs a local attacker
         // racing a list the user just reviewed by hand, and the check still stops every stale or mistaken path.
         let parent = (physical as NSString).deletingLastPathComponent
         guard let resolved = realPath(parent) else { return failure(errno: errno) }
         let writtenParent = item.path.split(separator: "/").dropLast().joined(separator: "/")
         let expected = writtenParent.isEmpty ? resolvedRoot : (resolvedRoot == "/" ? "/" : resolvedRoot + "/") + writtenParent
-        guard resolved.lowercased() == expected.lowercased() else { return .outsideDrive }
+        guard resolved == expected else { return .outsideDrive }
+        // The item's own name must be its on-disk name too. The file system folds case and Unicode (`ſ` opens `s`) more widely
+        // than any check here could match, so ask it which item the written path opens.
+        switch onDiskPath(physical) {
+        case .failure(let e): return failure(errno: e.code)
+        case .success(let actual):
+            let exact = (expected == "/" ? "/" : expected + "/") + (physical as NSString).lastPathComponent
+            // On the Data volume the kernel reports the firmlinked path (`/Users/...`), never `/System/Volumes/Data/Users/...`.
+            guard actual == exact || actual == TrashPath.userPath(root: resolvedRoot, relative: item.path) else { return .outsideDrive }
+        }
 
         let target = trashPath(physical: physical, physicalStat: itemStat, root: base, relative: item.path, stat: statFn)
         do {
@@ -224,6 +235,19 @@ public enum Trasher {
         else { return physical }
         return user
     }
+
+    /// The path the kernel holds for the item the written path opens (`F_GETPATH`). `O_SYMLINK` opens a symlink item as the
+    /// link; `O_EVTONLY` needs no read access; `O_NONBLOCK` keeps a FIFO from blocking. The descriptor is closed before returning.
+    static func onDiskPath(_ path: String) -> Result<String, Errno> {
+        let fd = open(path, O_EVTONLY | O_SYMLINK | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return .failure(Errno(errno)) }
+        defer { close(fd) }
+        var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(fd, F_GETPATH, &buffer) != -1 else { return .failure(Errno(errno)) }
+        return .success(String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self))
+    }
+
+    struct Errno: Error { let code: Int32; init(_ code: Int32) { self.code = code } }
 
     private static func realPath(_ path: String) -> String? {
         guard let p = realpath(path, nil) else { return nil }
