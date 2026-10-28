@@ -17,7 +17,7 @@ public actor LiveIndex {
     private let saveDebounce: Duration
     private let compactAbove: Double
 
-    private var index: ScanIndex?
+    var index: ScanIndex?
     private var rootPath = ""
     private var mountPoint = ""
     private var watcher: EventWatcher?
@@ -231,7 +231,7 @@ public actor LiveIndex {
 
     // MARK: - Private
 
-    private var history: HistoryStore { HistoryStore(directory: store.appending(path: "history")) }
+    var history: HistoryStore { HistoryStore(directory: store.appending(path: "history")) }
 
     private func recordHistoryLocked(now: Date) throws {
         guard let index else { return }
@@ -295,7 +295,7 @@ public actor LiveIndex {
         try? saveLocked()
     }
 
-    private func lock() async {
+    func lock() async {
         if busy {
             await withCheckedContinuation { waiters.append($0) }
         } else {
@@ -303,7 +303,7 @@ public actor LiveIndex {
         }
     }
 
-    private func unlock() {
+    func unlock() {
         if waiters.isEmpty {
             busy = false
         } else {

@@ -1,5 +1,5 @@
 /// One item that grew (positive) or shrank (negative).
-public struct Change: Sendable, Equatable {
+public struct Change: Codable, Sendable, Equatable {
     public var path: String
     public var delta: Int64
 

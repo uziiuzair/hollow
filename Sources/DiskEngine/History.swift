@@ -77,7 +77,7 @@ public struct Day: Codable, Hashable, Comparable, Sendable {
     }
 
     func date(in calendar: Calendar) -> Date {
-        calendar.date(from: DateComponents(year: year, month: month, day: day))!
+        calendar.date(from: DateComponents(year: year, month: month, day: day, hour: 12))!
     }
 
     var fileName: String { String(format: "%04d-%02d-%02d", year, month, day) }
