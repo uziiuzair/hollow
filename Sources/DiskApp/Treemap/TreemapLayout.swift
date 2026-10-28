@@ -62,7 +62,7 @@ public struct TreemapRect: Equatable, Sendable {
     }
 }
 
-public struct TreemapLayout: Sendable {
+public struct TreemapLayout: Equatable, Sendable {
     public var rects: [TreemapRect]
     public var bounds: CGRect
     public var topLevelCount: Int

@@ -1,3 +1,4 @@
+import Combine
 import CoreGraphics
 import Foundation
 import Testing
@@ -145,3 +146,16 @@ import Testing
     #expect(m.status == .ready && m.snapshot?.nodes[m.selected!].key == "b")
 }
 
+// An unchanged rebuild (a live update that moved nothing) publishes no new snapshot.
+@MainActor @Test func unchangedRebuildDoesNotPublish() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000, "b/g.bin": 1_200_000]); let m = model(src, throttle: .milliseconds(10))
+    await m.open(path: "", select: nil); await m.settle()
+    var published = 0
+    let sub = m.$snapshot.dropFirst().sink { _ in published += 1 }
+    m.sourceChanged(); await m.settle()
+    #expect(src.builds >= 2 && published == 0)
+    // A real change still publishes.
+    m.setSize(CGSize(width: 700, height: 600)); await m.settle()
+    #expect(published == 1)
+    sub.cancel()
+}

@@ -14,12 +14,41 @@ struct LabelQuad: Equatable, Sendable {
 /// Every label line of a snapshot, rasterized once into one premultiplied BGRA image.
 /// Built off main, read on main; all fields are immutable.
 final class LabelAtlas: @unchecked Sendable {
+    /// Nil when there is nothing to draw, or when `reused` (the previous atlas's texture still holds the lines).
     let image: CGImage?
     let quads: [LabelQuad]
+    /// Where each line sits in the atlas, so a later build with the same lines can reuse it.
+    let packing: Packing?
+    /// The lines are the previous atlas's, in its slots: draw with its texture, upload nothing.
+    let reused: Bool
 
-    private init(image: CGImage?, quads: [LabelQuad]) {
+    private init(image: CGImage?, quads: [LabelQuad], packing: Packing?, reused: Bool = false) {
         self.image = image
         self.quads = quads
+        self.packing = packing
+        self.reused = reused
+    }
+
+    /// One line's identity: what it says, how, and in which ink.
+    struct LineKey: Hashable, Sendable {
+        var text: String
+        var style: LabelStyle
+        var dark: Bool
+    }
+
+    /// The atlas's contents without its pixels. Small; kept by the renderer between builds.
+    struct Packing: Equatable, Sendable {
+        var keys: [LineKey]
+        var scale: CGFloat
+        var maxPixels: Int
+        /// Per key: its slot, nil when it did not fit.
+        var slots: [Slot?]
+        var width: Int
+        var height: Int
+    }
+
+    struct Slot: Equatable, Sendable {
+        var x: Int, y: Int, w: Int, h: Int
     }
 
     private struct Item {
@@ -55,7 +84,10 @@ final class LabelAtlas: @unchecked Sendable {
     /// Labels depth-1 rects (in their header when they have one) and childless deeper rects.
     /// Packs rows tallest first into an atlas at most `maxPixels` on a side, and skips what no longer fits.
     /// `darkText[i]` picks near-black over white for rect i (from `TreemapScene.darkLabels`).
-    static func build(snapshot: MapSnapshot, scale: CGFloat, darkText: [Bool], maxPixels: Int = 4096) -> LabelAtlas {
+    /// When the lines are exactly `previous`'s (a live update that moved blocks but changed no text),
+    /// it rasterizes nothing and returns quads into the previous atlas.
+    static func build(snapshot: MapSnapshot, scale: CGFloat, darkText: [Bool], maxPixels: Int = 4096,
+                      reusing previous: Packing? = nil) -> LabelAtlas {
         let layout = snapshot.layout
         let white = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
         // The mockup's light-mode text color.
@@ -68,6 +100,7 @@ final class LabelAtlas: @unchecked Sendable {
         }
 
         var items: [Item] = []
+        var keys: [LineKey] = []
         var tops = [Int32](repeating: 0, count: layout.rects.count)
         for (i, r) in layout.rects.enumerated() {
             tops[i] = r.parent < 0 ? Int32(i) : (r.parent < i ? tops[r.parent] : Int32(layout.topLevel(of: i)))
@@ -81,8 +114,10 @@ final class LabelAtlas: @unchecked Sendable {
             let large = mapArea > 0 && r.frame.width * r.frame.height >= 0.2 * mapArea
             guard let plan = LabelFit.plan(name: node.name, size: Format.gb(r.size), growth: growth,
                                            frame: frame, large: large, measure: measure) else { continue }
-            let color = i < darkText.count && darkText[i] ? ink : white
+            let dark = i < darkText.count && darkText[i]
+            let color = dark ? ink : white
             for l in plan.lines {
+                keys.append(LineKey(text: l.text, style: l.style, dark: dark))
                 let ct = line(l.text, l.style, color: color)
                 var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
                 let width = CTLineGetTypographicBounds(ct, &ascent, &descent, &leading)
@@ -92,6 +127,11 @@ final class LabelAtlas: @unchecked Sendable {
                                   origin: CGPoint(x: frame.minX + l.origin.x, y: frame.minY + l.origin.y),
                                   pixelSize: (w, h), topLevel: tops[i]))
             }
+        }
+
+        if let previous, previous.keys == keys, previous.scale == scale, previous.maxPixels == maxPixels {
+            return LabelAtlas(image: nil, quads: quads(items, slots: previous.slots, packing: previous, scale: scale),
+                              packing: previous, reused: true)
         }
 
         // Shelf packing, tallest first.
@@ -117,13 +157,11 @@ final class LabelAtlas: @unchecked Sendable {
               let context = CGContext(data: nil, width: usedWidth, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-        else { return LabelAtlas(image: nil, quads: []) }
+        else { return LabelAtlas(image: nil, quads: [], packing: nil) }
 
         context.setShouldSmoothFonts(false)
         context.scaleBy(x: scale, y: scale)
-        var quads: [LabelQuad] = []
-        quads.reserveCapacity(placed.count)
-        let atlasW = Float(usedWidth), atlasH = Float(height)
+        var slots = [Slot?](repeating: nil, count: items.count)
         for index in placed {
             let item = items[index]
             let (w, h) = item.pixelSize
@@ -132,11 +170,26 @@ final class LabelAtlas: @unchecked Sendable {
             context.textPosition = CGPoint(x: (CGFloat(sx) + 1) / scale,
                                            y: (CGFloat(height - sy - h) + 1) / scale + item.descent)
             CTLineDraw(item.line, context)
-            quads.append(LabelQuad(
-                rect: SIMD4(Float(item.origin.x - 1 / scale), Float(item.origin.y - 1 / scale), Float(w) / Float(scale), Float(h) / Float(scale)),
-                uv: SIMD4(Float(sx) / atlasW, Float(sy) / atlasH, Float(sx + w) / atlasW, Float(sy + h) / atlasH),
-                topLevel: item.topLevel))
+            slots[index] = Slot(x: sx, y: sy, w: w, h: h)
         }
-        return LabelAtlas(image: context.makeImage(), quads: quads)
+        let packing = Packing(keys: keys, scale: scale, maxPixels: maxPixels, slots: slots, width: usedWidth, height: height)
+        return LabelAtlas(image: context.makeImage(), quads: quads(items, slots: slots, packing: packing, scale: scale),
+                          packing: packing)
+    }
+
+    /// One quad per placed line, at its item's origin, in placement order (tallest first).
+    private static func quads(_ items: [Item], slots: [Slot?], packing: Packing, scale: CGFloat) -> [LabelQuad] {
+        let atlasW = Float(packing.width), atlasH = Float(packing.height)
+        let order = slots.indices.filter { slots[$0] != nil }
+            .sorted { (slots[$0]!.y, slots[$0]!.x) < (slots[$1]!.y, slots[$1]!.x) }
+        return order.map { index in
+            let item = items[index], slot = slots[index]!
+            return LabelQuad(
+                rect: SIMD4(Float(item.origin.x - 1 / scale), Float(item.origin.y - 1 / scale),
+                            Float(slot.w) / Float(scale), Float(slot.h) / Float(scale)),
+                uv: SIMD4(Float(slot.x) / atlasW, Float(slot.y) / atlasH,
+                          Float(slot.x + slot.w) / atlasW, Float(slot.y + slot.h) / atlasH),
+                topLevel: item.topLevel)
+        }
     }
 }

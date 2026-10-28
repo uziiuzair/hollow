@@ -255,6 +255,16 @@ public final class MapModel: ObservableObject {
         // A rebuild of the same level (an update, a resize) keeps the hover while its item exists;
         // a new level drops it.
         let old = snapshot
+        // A rebuild that changed nothing (most live updates at idle) publishes nothing, so the
+        // window does not rebuild its instances, labels and GPU buffers.
+        if let result, let old, result == old, pendingZoom == nil {
+            let top = 0..<old.layout.topLevelCount
+            let kept = selectedKey.flatMap { key in top.first { old.nodes[$0].key == key } }
+            if selected != kept { selected = kept }
+            let ready: MapStatus = old.layout.rects.isEmpty ? .empty : .ready
+            if status != ready { status = ready }
+            return
+        }
         let hoveredKey = hovered.flatMap { h in old?.nodes.indices.contains(h) == true ? old?.nodes[h].key : nil }
         hovered = nil
         guard let result else {

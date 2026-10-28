@@ -62,7 +62,7 @@ public struct ListRow: Equatable, Sendable {
     }
 }
 
-public struct MapSnapshot: Sendable {
+public struct MapSnapshot: Equatable, Sendable {
     public var path: String
     public var rootPath: String
     public var crumbs: [Crumb]

@@ -34,6 +34,8 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
         let labels: MTLBuffer?
         let labelCount: Int
         let atlas: MTLTexture?
+        /// What `atlas` holds, so the next scene with the same lines reuses it.
+        let packing: LabelAtlas.Packing?
     }
 
     private struct ZoomStats {
@@ -83,8 +85,9 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
         uniforms.outlineRing = TreemapScene.outlineRing(dark: dark)
         let scale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let box = DeviceBox(device: device)
+        let previous = scene
         pending = Task.detached(priority: .userInitiated) { [weak self] in
-            guard let scene = Self.makeScene(snapshot, dark: dark, scale: scale, device: box.device),
+            guard let scene = Self.makeScene(snapshot, dark: dark, scale: scale, device: box.device, previous: previous),
                   !Task.isCancelled else { return }
             await self?.install(scene, generation: generation, animation: animation, in: view)
         }
@@ -92,11 +95,14 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
 
     /// Nil when the task was cancelled (a newer `show` superseded it). Checks between the expensive
     /// steps so a superseded build never rasterizes labels or allocates GPU memory it will throw away.
-    nonisolated private static func makeScene(_ snapshot: MapSnapshot, dark: Bool, scale: CGFloat, device: MTLDevice) -> Scene? {
+    /// The label atlas is reused from `previous` when the lines are the same.
+    nonisolated private static func makeScene(_ snapshot: MapSnapshot, dark: Bool, scale: CGFloat, device: MTLDevice,
+                                              previous: Scene?) -> Scene? {
         var instances = TreemapScene.instances(snapshot: snapshot, dark: dark)
         guard !Task.isCancelled else { return nil }
         let darkText = TreemapScene.darkLabels(instances: instances, layout: snapshot.layout, dark: dark)
-        let atlas = LabelAtlas.build(snapshot: snapshot, scale: scale, darkText: darkText)
+        let reusable = previous?.atlas == nil ? nil : previous?.packing
+        let atlas = LabelAtlas.build(snapshot: snapshot, scale: scale, darkText: darkText, reusing: reusable)
         guard !Task.isCancelled else { return nil }
         var quads = atlas.quads
         let blocks = instances.isEmpty ? nil : device.makeBuffer(
@@ -105,7 +111,8 @@ final class TreemapRenderer: NSObject, MTKViewDelegate {
             bytes: &quads, length: quads.count * MemoryLayout<LabelQuad>.stride, options: .storageModeShared)
         return Scene(blocks: blocks, blockCount: blocks == nil ? 0 : instances.count,
                      labels: labels, labelCount: labels == nil ? 0 : quads.count,
-                     atlas: atlas.image.flatMap { texture($0, device: device) })
+                     atlas: atlas.reused ? previous?.atlas : atlas.image.flatMap { texture($0, device: device) },
+                     packing: atlas.packing)
     }
 
     /// Uploads an atlas made by `LabelAtlas` (premultiplied BGRA, sRGB) as is.
