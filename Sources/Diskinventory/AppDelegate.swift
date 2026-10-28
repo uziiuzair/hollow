@@ -162,7 +162,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if CommandLine.arguments.contains("--show-map"), let id = internalUUID {
             startHeartbeat()
-            DispatchQueue.main.async { [weak self] in self?.openMap(uuid: id, focus: nil) }
+            // --map-focus <relative path>: opens the map at that item's folder with it selected.
+            let focus = CommandLine.arguments.firstIndex(of: "--map-focus")
+                .flatMap { $0 + 1 < CommandLine.arguments.count ? CommandLine.arguments[$0 + 1] : nil }
+            DispatchQueue.main.async { [weak self] in self?.openMap(uuid: id, focus: focus) }
         }
         // --apply-stats: every 60 s, what each warm drive's index applied since the last line.
         if CommandLine.arguments.contains("--apply-stats") {

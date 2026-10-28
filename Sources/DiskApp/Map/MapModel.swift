@@ -1,4 +1,5 @@
 import CoreGraphics
+import DiskEngine
 import Foundation
 
 /// Where the map window gets its maps: a drive it can hold warm while the window is open.
@@ -30,6 +31,16 @@ public final class MapModel: ObservableObject {
     /// Any rect index.
     @Published public var hovered: Int?
     public var reduceMotion: Bool
+    /// False while the window is occluded or minimized: source changes then only mark the map stale, and showing the
+    /// window again builds once if they did.
+    public var isVisible = true {
+        didSet {
+            guard isVisible, !oldValue, staleWhileHidden else { return }
+            staleWhileHidden = false
+            lastSourceBuild = clock.now
+            requestBuild()
+        }
+    }
 
     public let driveName: String
     private var source: any MapSource
@@ -56,6 +67,10 @@ public final class MapModel: ObservableObject {
     /// Only sourceChanged() builds count toward the throttle window.
     private var lastSourceBuild: ContinuousClock.Instant?
     private var trailing: Task<Void, Never>?
+    /// Bytes changed at or under the zoomed folder since the last build, too few so far to move 1 pt² of the map.
+    private var pendingBytes: UInt64 = 0
+    /// A source change wanted a build while the window was hidden.
+    private var staleWhileHidden = false
 
     private enum PendingZoom {
         case into(from: CGRect, bounds: CGRect)
@@ -115,10 +130,18 @@ public final class MapModel: ObservableObject {
         requestBuild()
     }
 
-    /// The drive changed (an update, its activity or period). Builds at once, then at
-    /// most once more per throttle window.
-    public func sourceChanged() {
-        guard isOpen, trailing == nil else { return }
+    /// The drive changed (an update, its activity or period). Builds at once, then at most once more per throttle
+    /// window. `change` (an index update) skips the build while what it changed inside the zoomed folder adds up to
+    /// less than 1 pt² of the map; nil always builds.
+    public func sourceChanged(_ change: IndexChange? = nil) {
+        guard isOpen else { return }
+        if let delta = Self.visibleDelta(change, zoomPath: zoomPath) {
+            pendingBytes &+= delta
+            let total = Double(max(snapshot?.total ?? 0, 1))
+            guard Double(pendingBytes) * Double(size.width) * Double(size.height) / total >= 1 else { return }
+        }
+        guard isVisible else { staleWhileHidden = true; return }
+        guard trailing == nil else { return }
         let now = clock.now
         if let last = lastSourceBuild, now - last < throttle {
             let due = last + throttle
@@ -169,6 +192,21 @@ public final class MapModel: ObservableObject {
         select(min(max(start + step, 0), count - 1))
     }
 
+    /// How many bytes `change` moved at or under `zoomPath` (every path is under ""), or nil when the map must build
+    /// anyway: anything may have changed, or a changed folder is a strict ancestor of `zoomPath`.
+    nonisolated public static func visibleDelta(_ change: IndexChange?, zoomPath: String) -> UInt64? {
+        guard let folders = change?.folders else { return nil }
+        var sum: UInt64 = 0
+        for (path, delta) in folders {
+            if path == zoomPath || zoomPath.isEmpty || path.hasPrefix(zoomPath + "/") {
+                sum &+= delta.magnitude
+            } else if path.isEmpty || zoomPath.hasPrefix(path + "/") {
+                return nil
+            }
+        }
+        return sum
+    }
+
     /// Releases the source and drops the map data.
     public func close() {
         guard isOpen else { return }
@@ -178,6 +216,8 @@ public final class MapModel: ObservableObject {
         trailing?.cancel(); trailing = nil
         lastSourceBuild = nil
         dirty = false
+        pendingBytes = 0
+        staleWhileHidden = false
         snapshot = nil
         selected = nil
         hovered = nil
@@ -202,7 +242,8 @@ public final class MapModel: ObservableObject {
         guard disconnected, !isOpen else { return }
         disconnected = false
         self.source = source
-        // close() already dropped any trailing build, the dirty flag and the throttle window, so this builds at once.
+        // close() already dropped any trailing build, the dirty flag, the throttle window, the pending tiny changes
+        // and the hidden window's stale flag (C22), so this builds at once and nothing old carries over.
         await open(path: zoomPath, select: selectedKey)
     }
 
@@ -246,6 +287,8 @@ public final class MapModel: ObservableObject {
 
     private func startBuild() {
         dirty = false
+        pendingBytes = 0
+        staleWhileHidden = false
         let id = latest
         let request = MapRequest(path: zoomPath, size: size, period: source.period)
         inFlight = Task { [weak self] in

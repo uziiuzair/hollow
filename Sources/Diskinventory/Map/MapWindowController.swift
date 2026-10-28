@@ -138,10 +138,20 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func observeController(_ controller: DriveController, model: MapModel, ui: MapWindowState) {
+        // The opening build (or a reattach's) covers whatever the controller changed before this window watched it.
+        _ = controller.takeChange()
         // C5: @Published fires on willSet; hop a turn so the model reads the new values.
-        Publishers.Merge3(controller.$generation.dropFirst().map { _ in () },
-                          controller.$activity.dropFirst().map { _ in () },
-                          controller.$period.dropFirst().map { _ in () })
+        // C16: each update merges into the controller's pending change, so an update whose hop finds it already taken
+        // was handed over by an earlier hop and needs nothing more.
+        controller.$generation.dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak model, weak controller] _ in
+                guard let model, let change = controller?.takeChange() else { return }
+                model.sourceChanged(change)
+            }
+            .store(in: &controllerSubscriptions)
+        Publishers.Merge(controller.$activity.dropFirst().map { _ in () },
+                         controller.$period.dropFirst().map { _ in () })
             .receive(on: DispatchQueue.main)
             .sink { [weak model] in model?.sourceChanged() }
             .store(in: &controllerSubscriptions)
@@ -538,6 +548,22 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         onBecameKey?()
+    }
+
+    // An occluded or minimized window builds no maps; it builds once when it shows again, if the drive changed.
+    func windowDidChangeOcclusionState(_ notification: Notification) { updateVisibility() }
+    func windowDidMiniaturize(_ notification: Notification) { updateVisibility() }
+    func windowDidDeminiaturize(_ notification: Notification) { updateVisibility() }
+
+    private func updateVisibility() {
+        guard let window, let model else { return }
+        var visible = window.occlusionState.contains(.visible) && !window.isMiniaturized
+        #if DEBUG
+        // --map-ignore-occlusion: builds as if shown, so a check run with the screen locked still sees live updates.
+        if CommandLine.arguments.contains("--map-ignore-occlusion") { visible = true }
+        if visible != model.isVisible { debugLog.info("map window visible: \(visible)") }
+        #endif
+        model.isVisible = visible
     }
 
     func windowWillClose(_ notification: Notification) {

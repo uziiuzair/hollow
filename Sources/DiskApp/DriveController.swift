@@ -67,6 +67,10 @@ public final class DriveController: ObservableObject {
     /// Tests only: the `protected` set the last trash used.
     private(set) var lastProtected: [LensHit] = []
     private static let log = Logger(subsystem: AppIdentity.bundleID, category: "index")
+    #if DEBUG
+    /// One line per map build, so a measurement can count them.
+    private static let mapLog = Logger(subsystem: AppIdentity.bundleID, category: "map")
+    #endif
     /// Tests only: runs between a map build's index read and its unmount check.
     var afterMapRead: (() async -> Void)?
     /// Tests only: runs off main just before the unreadable-folder retry starts its scan.
@@ -365,6 +369,9 @@ extension DriveController: MapSource {
         let baseline = await baseline(days: request.period, from: index)
         guard !unmounting else { return nil }
         let map = try? await index.read { MapBuilder.build(index: $0, request: request, baseline: baseline) }
+        #if DEBUG
+        Self.mapLog.info("map build \(request.path, privacy: .public)")
+        #endif
         await afterMapRead?()
         // An unmount that began during the read: its map must not land.
         guard !unmounting else { return nil }
