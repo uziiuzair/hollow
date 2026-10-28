@@ -11,3 +11,11 @@ import DiskEngine
     #expect(MenuBarLabel.make(space: .init(total: 1000*gb, available: 300*gb, availableForImportantUsage: 300*gb), showNumber: true).level == .normal)
     #expect(MenuBarLabel.make(space: .init(total: 1000*gb, available: 300*gb, availableForImportantUsage: 300*gb), showNumber: false).text == "")
 }
+
+// Final review 5: a full disk draws a full ring, not a zero-length arc.
+@Test func ringFillDrawsFullCircleWhenFull() {
+    #expect(RingFill.forFraction(0) == .none)
+    #expect(RingFill.forFraction(0.25) == .arc(endAngle: 0))
+    #expect(RingFill.forFraction(1.0) == .full)
+    #expect(RingFill.forFraction(1.3) == .full)
+}
