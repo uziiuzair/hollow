@@ -79,6 +79,11 @@ public struct BasketItem: Equatable, Sendable, Identifiable {
         return true
     }
 
+    /// True when `add(item)` would take it.
+    public func accepts(_ item: BasketItem) -> Bool {
+        !BasketItem.isBucketOrRoot(item.path) && !items.contains { $0.covers(item.path) }
+    }
+
     public func add(contentsOf newItems: [BasketItem]) {
         var next = items
         var changed = false

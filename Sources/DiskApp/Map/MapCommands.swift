@@ -1,7 +1,7 @@
 import Foundation
 
 public enum MapAction: Equatable, Sendable {
-    case revealInFinder, copyPath, zoomToParent, goTo(key: String)
+    case addToBasket, revealInFinder, copyPath, zoomToParent, goTo(key: String)
 }
 
 public struct CommandItem: Equatable, Sendable {
@@ -18,9 +18,11 @@ public struct CommandItem: Equatable, Sendable {
 
 public enum MapCommands {
     /// The caller passes `hasSelection && !isBucket`: Reveal and Copy need a real file or folder.
+    /// `canAddToBasket` is true when the selection can go in the basket (not the root, a bucket or something already in it).
     public static func items(query: String, hasSelection: Bool, canZoomOut: Bool,
-                             children: [(name: String, key: String)]) -> [CommandItem] {
+                             children: [(name: String, key: String)], canAddToBasket: Bool = false) -> [CommandItem] {
         var base: [CommandItem] = []
+        if canAddToBasket { base.append(CommandItem(title: "Add to Basket", shortcut: "⌫", action: .addToBasket)) }
         if hasSelection {
             base.append(CommandItem(title: "Reveal in Finder", shortcut: nil, action: .revealInFinder))
             base.append(CommandItem(title: "Copy Path", shortcut: nil, action: .copyPath))
@@ -49,7 +51,7 @@ public struct KeyModifiers: OptionSet, Sendable {
 }
 
 public enum MapKeyCommand: Equatable, Sendable {
-    case zoomIn, zoomOut, quickLook, openCommands, selectPrevious, selectNext
+    case zoomIn, zoomOut, quickLook, openCommands, selectPrevious, selectNext, addToBasket
     case closeSearch, runCommand, commandUp, commandDown
 }
 
@@ -75,6 +77,7 @@ public enum MapKey {
         case 36: return .zoomIn
         case 53: return .zoomOut
         case 49: return .quickLook
+        case 51: return .addToBasket
         case 126: return .selectPrevious
         case 125: return .selectNext
         default: return nil

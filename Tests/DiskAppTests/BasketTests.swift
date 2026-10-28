@@ -130,3 +130,20 @@ let dockerHit = LensHit(ruleID: "docker", path: "Users/u/Library/Containers/com.
     #expect(s.rows[4].instruction == "This is a system or account folder; remove things inside it instead.")
     #expect(s.selectedTotal == 2)
 }
+
+@Test func dragStartsAfterFourPointsAndDropsOnTheBar() {
+    var d = BasketDrag(at: CGPoint(x: 100, y: 100), item: 3)
+    d.move(to: CGPoint(x: 103, y: 100)); #expect(!d.isActive)
+    d.move(to: CGPoint(x: 104, y: 101)); #expect(d.isActive)
+    d.move(to: CGPoint(x: 100, y: 100)); #expect(d.isActive)
+    #expect(d.dropsOnBasket(CGRect(x: 90, y: 90, width: 30, height: 30)) && !d.dropsOnBasket(CGRect(x: 0, y: 0, width: 50, height: 50)))
+    var tap = BasketDrag(at: .zero, item: 1); tap.move(to: CGPoint(x: 2, y: 2))
+    #expect(!tap.dropsOnBasket(CGRect(x: -10, y: -10, width: 20, height: 20)))
+}
+
+@MainActor @Test func acceptsWhatAddWouldTake() {
+    let b = Basket()
+    b.add(item("a", 1, folder: true))
+    #expect(!b.accepts(item("a", 1)) && !b.accepts(item("a/b", 1)) && !b.accepts(item("", 1)) && !b.accepts(item("x#small", 1)))
+    #expect(b.accepts(item("c", 1)) && b.accepts(item("ab", 1)))
+}

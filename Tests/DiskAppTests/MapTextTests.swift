@@ -84,3 +84,16 @@ import Testing
     #expect(MapKey.command(keyCode: 40, characters: "k", modifiers: [.command, .shift], searchFocused: false) == nil)
     #expect(MapKey.command(keyCode: 40, characters: "k", modifiers: [], searchFocused: false) == nil)
 }
+
+@Test func deleteAddsToBasketUnlessTyping() {
+    #expect(MapKey.command(keyCode: 51, modifiers: [], searchFocused: false) == .addToBasket)
+    #expect(MapKey.command(keyCode: 51, modifiers: [], searchFocused: true) == nil)
+    #expect(MapKey.command(keyCode: 51, modifiers: .command, searchFocused: false) == nil)
+}
+
+@Test func commandBarOffersAddToBasket() {
+    let add = CommandItem(title: "Add to Basket", shortcut: "⌫", action: .addToBasket)
+    #expect(MapCommands.items(query: "", hasSelection: true, canZoomOut: false, children: [], canAddToBasket: true).first == add)
+    #expect(MapCommands.items(query: "bask", hasSelection: true, canZoomOut: false, children: [], canAddToBasket: true) == [add])
+    #expect(!MapCommands.items(query: "", hasSelection: true, canZoomOut: false, children: []).contains(add))
+}

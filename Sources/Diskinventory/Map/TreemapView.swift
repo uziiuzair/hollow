@@ -16,11 +16,15 @@ struct TreemapView: NSViewRepresentable {
     let view: TreemapMTKView
     let model: MapModel
     let pointer: MapPointer
+    let onDrag: (BasketDrag) -> Void
+    let onDrop: (BasketDrag) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> TreemapMTKView {
         context.coordinator.attach(view: view, model: model, pointer: pointer)
+        view.onDrag = onDrag
+        view.onDrop = onDrop
         return view
     }
 
@@ -72,6 +76,8 @@ struct TreemapView: NSViewRepresentable {
             view.onHover = nil
             view.onClick = nil
             view.onResize = nil
+            view.onDrag = nil
+            view.onDrop = nil
         }
 
         private static func highlight(_ view: TreemapMTKView, _ model: MapModel) {

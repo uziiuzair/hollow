@@ -40,6 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastDismiss = Date.distantPast
     private var clickMonitor: Any?
     private var mapWindow: MapWindowController?
+    /// One basket per mounted drive, by volume UUID; dropped when the drive is really gone (C20).
+    private let baskets = BasketStore()
     /// Last saved summaries of drives that are not connected, read once per uuid and period.
     private var cachedSummaries: [String: [Int: DriveSummary?]] = [:]
     #if DEBUG
@@ -119,6 +121,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // --map-snapshot <dir>: with --show-map, writes the window's PNGs once the map is drawn.
         if let i = CommandLine.arguments.firstIndex(of: "--map-snapshot"), i + 1 < CommandLine.arguments.count {
             debugSnapshotDir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+        }
+        // --debug-basket <dir> [--debug-basket-move]: drives the basket and review sheet on the throwaway DITrash image only.
+        if let i = CommandLine.arguments.firstIndex(of: "--debug-basket"), i + 1 < CommandLine.arguments.count {
+            let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+            let move = CommandLine.arguments.contains("--debug-basket-move")
+            Task { [weak self] in await self?.debugBasket(to: dir, move: move) }
         }
         #endif
     }
@@ -249,6 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.unmounts[uuid] = nil
                 self.unmountFinished[uuid] = nil
                 self.connectedSince[uuid] = nil
+                self.baskets.drop(uuid)
             }
             self.syncVolumes()
         }
@@ -309,7 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let model = DropdownModel.make(
             drives: registry.all(), selected: selected, connected: connected, summary: summary,
             space: c?.space, activity: c?.activity ?? .offline, period: period,
-            connectedSince: connectedSince[selected], now: .now)
+            connectedSince: connectedSince[selected], now: .now, clearable: c?.clearable)
         if state.model != model { state.model = model }
         if state.period != period { state.period = period }
         // A new controller for the same UUID (remount, failed eject) needs a fresh subscription.
@@ -373,6 +382,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.panel?.dismiss()
                 self.openMap(uuid: self.selected, focus: focus)
+            },
+            reviewClearable: { [weak self] in
+                guard let self else { return }
+                self.reviewClearable(uuid: self.selected)
             })
         let p = DropdownPanel(rootView: host)
         p.onDismiss = { [weak self] in self?.panelDismissed() }
@@ -466,6 +479,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     #endif
 
+    #if DEBUG
+    /// The only volume the basket driver will touch: a disk image mounted at exactly this path, never the internal disk (C9).
+    private static let debugBasketVolume = "/Volumes/DITrash"
+
+    private func debugBasket(to dir: URL, move: Bool) async {
+        let url = URL(fileURLWithPath: Self.debugBasketVolume)
+        let values = try? url.resourceValues(forKeys: [.volumeIsInternalKey, .volumeIsEjectableKey, .volumeURLKey])
+        guard let c = controller(for: url), !c.volume.isInternalData, c.volume.url.path == Self.debugBasketVolume,
+              values?.volume?.path == Self.debugBasketVolume, values?.volumeIsInternal != true, values?.volumeIsEjectable == true
+        else {
+            mapLog.error("debug-basket: refused, \(Self.debugBasketVolume, privacy: .public) is not a mounted external image")
+            return
+        }
+        let uuid = c.volume.uuid
+        func settle(_ ms: Int = 1500) async { try? await Task.sleep(for: .milliseconds(ms)) }
+        selectDrive(uuid)
+        await c.warm()
+        for _ in 0..<100 where c.lens == nil { await settle(200) }
+        rebuild()
+        mapLog.info("debug-basket: review title \(self.state.model.reviewTitle ?? "none", privacy: .public), free \(self.state.model.freeTitle, privacy: .public)")
+        showPanel(keepOpen: true)
+        await settle()
+        debugCapture(panel, to: dir.appending(path: "panel.png"))
+        reviewClearable(uuid: uuid)
+        await settle(2500)
+        guard let window = mapWindow, window.uuid == uuid else { return }
+        window.debugSheetSnapshot(to: dir.appending(path: "review.png"))
+        mapLog.info("debug-basket: basket \(window.basket.items.map(\.path), privacy: .public)")
+        if move {
+            let clock = ContinuousClock()
+            let started = clock.now
+            let outcome = await window.debugMoveReviewed()
+            let ms = (clock.now - started) / .milliseconds(1)
+            mapLog.info("debug-basket: \(outcome.title, privacy: .public) / \(outcome.detail ?? "-", privacy: .public) / \(outcome.failureLines, privacy: .public) in \(Int(ms)) ms")
+            rebuild()
+            mapLog.info("debug-basket: after move free \(self.state.model.freeTitle, privacy: .public), review \(self.state.model.reviewTitle ?? "none", privacy: .public)")
+            await settle(1000)
+            debugCapture(panel, to: dir.appending(path: "panel-after.png"))
+            // A symlink item goes to the Trash as the link; its target stays (fixture made by the check script).
+            let link = BasketItem(path: "Users/u/linkcheck/link", name: "link", size: 0, kind: .other, isFolder: false,
+                                  ruleID: nil, safety: nil)
+            let linkOutcome = await c.trash([link], backend: SystemTrash())
+            mapLog.info("debug-basket: symlink moved \(linkOutcome.moved, privacy: .public) failures \(linkOutcome.failureLines, privacy: .public)")
+        }
+        window.debugCloseReview()
+        await settle()
+        await window.debugBasketDrive(to: dir)
+        mapLog.info("debug-basket: done")
+    }
+
+    private func debugCapture(_ window: NSWindow?, to url: URL) {
+        guard let content = window?.contentView, let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { return }
+        content.cacheDisplay(in: content.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
+    }
+    #endif
+
     // MARK: Main menu
 
     /// Shown only while the map window makes the app regular; gives the window ⌘W, ⌘M, ⌘Q,
@@ -518,7 +588,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 mapWindow = nil
                 old.close()
             }
-            let window = MapWindowController(controller: controller, drive: drive, path: path, select: select)
+            let window = MapWindowController(controller: controller, drive: drive, path: path, select: select,
+                                             basket: baskets.basket(for: uuid))
             window.onClose = { [weak self, weak window] in
                 guard let self, self.mapWindow === window else { return }
                 self.mapWindow = nil
@@ -545,6 +616,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         if let w = mapWindow?.window { NSLog("Diskinventory map window \(w.windowNumber) frame \(w.frame)") }
         #endif
+    }
+
+    /// "Review N GB to clear": puts the drive's regenerating hits in its basket, opens the map at the root and shows
+    /// the review sheet. Nothing moves until the user presses "Move N items to Trash" there.
+    func reviewClearable(uuid: String) {
+        panel?.dismiss()
+        guard let c = controllers[uuid], unmounts[uuid] == nil else { return }
+        let hits = c.lens?.hits.filter { $0.safety == .regenerates } ?? []
+        baskets.basket(for: uuid).add(contentsOf: hits.map(BasketItem.from(hit:)))
+        openMap(uuid: uuid, focus: nil)
+        guard let window = mapWindow, window.uuid == uuid, window.driveController === c else { return }
+        window.presentReview()
     }
 
     // MARK: Quit

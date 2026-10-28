@@ -8,10 +8,15 @@ final class TreemapMTKView: MTKView {
     var onHover: ((CGPoint?) -> Void)?
     var onClick: ((CGPoint) -> Void)?
     var onResize: ((CGSize) -> Void)?
+    /// A press that moved `BasketDrag.threshold` points or more; locations are in the window's content, top-left origin.
+    var onDrag: ((BasketDrag) -> Void)?
+    var onDrop: ((BasketDrag) -> Void)?
 
     private(set) var renderer: TreemapRenderer?
     private var snapshot: MapSnapshot?
     private var tracking: NSTrackingArea?
+    /// The press in progress, on a block's top-level rect.
+    private var drag: BasketDrag?
 
     init?(device: MTLDevice? = MTLCreateSystemDefaultDevice()) {
         guard let device, let renderer = TreemapRenderer(device: device) else { return nil }
@@ -37,6 +42,16 @@ final class TreemapMTKView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        drag = nil
+        guard let layout = snapshot?.layout, let hit = layout.hitTest(point(event)), let content = contentPoint(event) else { return }
+        drag = BasketDrag(at: content, item: layout.topLevel(of: hit))
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard var drag, let content = contentPoint(event) else { return }
+        drag.move(to: content)
+        self.drag = drag
+        onDrag?(drag)
     }
 
     var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
@@ -99,7 +114,20 @@ final class TreemapMTKView: MTKView {
     override func mouseMoved(with event: NSEvent) { onHover?(point(event)) }
     override func mouseExited(with event: NSEvent) { onHover?(nil) }
     override func mouseUp(with event: NSEvent) {
+        let press = drag
+        drag = nil
+        if let press, press.isActive {
+            onDrop?(press)
+            return
+        }
         let p = point(event)
         if bounds.contains(p) { onClick?(p) }
+    }
+
+    /// The event in the window's content view, top-left origin: the SwiftUI window's "mapWindow" coordinate space.
+    private func contentPoint(_ event: NSEvent) -> CGPoint? {
+        guard let content = window?.contentView else { return nil }
+        let p = content.convert(event.locationInWindow, from: nil)
+        return content.isFlipped ? p : CGPoint(x: p.x, y: content.bounds.height - p.y)
     }
 }

@@ -19,20 +19,26 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     private var model: MapModel?
     private var ui: MapWindowState?
     private var mapView: TreemapMTKView?
+    private var dragState: BasketDragState?
+    /// This drive's basket; it outlives the window (the store keeps it until the drive is gone).
+    let basket: Basket
     private var subscriptions: Set<AnyCancellable> = []
     private var keyMonitor: Any?
     private var displayObserver: NSObjectProtocol?
 
-    init(controller: DriveController, drive: KnownDrive, path: String, select: String?) {
+    init(controller: DriveController, drive: KnownDrive, path: String, select: String?, basket: Basket) {
         uuid = drive.uuid
         driveController = controller
+        self.basket = basket
         let model = MapModel(source: controller, driveName: drive.name,
                              reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
         let ui = MapWindowState(driveName: drive.name,
                                 tint: Palette.tints[drive.tintIndex % Palette.tints.count],
-                                isInternal: controller.volume.isInternalData)
+                                isInternal: controller.volume.isInternalData, basket: basket)
+        let dragState = BasketDragState()
         self.model = model
         self.ui = ui
+        self.dragState = dragState
 
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -56,9 +62,15 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
             run: { [weak self] in self?.run($0) },
             zoomIn: { [weak self] in self?.zoomIntoSelection() },
             quickLook: { [weak self] in self?.toggleQuickLook() },
-            openCommands: { [weak self] in self?.ui?.focusRequest += 1 })
-        let hosting = NSHostingView(rootView: MapWindowView(model: model, ui: ui, pointer: MapPointer(),
-                                                            mapView: mapView, actions: actions))
+            openCommands: { [weak self] in self?.ui?.focusRequest += 1 },
+            addToBasket: { [weak self] in self?.addSelectionToBasket() },
+            drag: { [weak self] in self?.dragChanged($0) },
+            drop: { [weak self] in self?.dropped($0) },
+            review: { [weak self] in self?.presentReview() },
+            trash: { [weak self] items in await self?.moveToTrash(items) ?? .driveGone(items, protected: []) },
+            protected: { [weak self] in self?.driveController?.protectedHits ?? [] })
+        let hosting = NSHostingView(rootView: MapWindowView(model: model, ui: ui, basket: basket, pointer: MapPointer(),
+                                                            dragState: dragState, mapView: mapView, actions: actions))
         // The window, not the SwiftUI content, decides the window's size.
         hosting.sizingOptions = []
         window.contentView = hosting
@@ -132,16 +144,23 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
 
     /// True when the event was handled and should be swallowed.
     private func handleKey(_ event: NSEvent) -> Bool {
-        guard let window, window.isKeyWindow, event.window === window, let model, let ui else { return false }
+        guard let window, window.isKeyWindow, event.window === window, model != nil, let ui else { return false }
         let modifiers = KeyModifiers(eventFlags: event.modifierFlags)
         guard let command = MapKey.command(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers,
                                            modifiers: modifiers, searchFocused: ui.searchFocused)
         else { return false }
+        perform(command)
+        return true
+    }
+
+    private func perform(_ command: MapKeyCommand) {
+        guard let model, let ui else { return }
         switch command {
         case .zoomIn: zoomIntoSelection()
         case .zoomOut: model.zoomOut()
         case .quickLook: toggleQuickLook()
         case .openCommands: ui.focusRequest += 1
+        case .addToBasket: addSelectionToBasket()
         case .selectPrevious: model.moveSelection(by: -1)
         case .selectNext: model.moveSelection(by: 1)
         case .closeSearch: closeSearch()
@@ -153,7 +172,44 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         case .commandDown:
             ui.commandIndex = min(ui.commandIndex + 1, max(ui.commands(model).count - 1, 0))
         }
-        return true
+    }
+
+    // MARK: Basket
+
+    /// Opens the review sheet over the map.
+    func presentReview() {
+        ui?.reviewShown = true
+    }
+
+    /// ⌫ and "Add to Basket": the selected block, unless it is a bucket, the root or already in the basket.
+    private func addSelectionToBasket() {
+        guard let model, let selected = model.selected else { return }
+        addToBasket(rect: selected)
+    }
+
+    private func addToBasket(rect: Int) {
+        guard let model, let item = ui?.basketItem(model, rect: rect) else { return }
+        basket.add(item)
+    }
+
+    private func dragChanged(_ drag: BasketDrag) {
+        guard let dragState else { return }
+        let next = drag.isActive ? drag : nil
+        if dragState.drag != next { dragState.drag = next }
+    }
+
+    private func dropped(_ drag: BasketDrag) {
+        guard let dragState else { return }
+        if drag.dropsOnBasket(dragState.barFrame) { addToBasket(rect: drag.item) }
+        dragState.drag = nil
+    }
+
+    /// The review sheet's "Move N items to Trash". The window's own controller only: after a disconnect it moves nothing.
+    private func moveToTrash(_ items: [BasketItem]) async -> TrashOutcome {
+        guard let controller = driveController, model?.status != .offline else {
+            return .driveGone(items, protected: driveController?.protectedHits ?? [])
+        }
+        return await controller.trash(items, backend: SystemTrash())
     }
 
     private func zoomIntoSelection() {
@@ -180,6 +236,8 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         guard let model else { return }
         let url = model.selected.flatMap { model.snapshot?.url(of: $0) }
         switch action {
+        case .addToBasket:
+            addSelectionToBasket()
         case .revealInFinder:
             if let url { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         case .copyPath:
@@ -283,8 +341,147 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
             let frame = mapView.convert(mapView.bounds, to: nil)
             NSGraphicsContext.current?.cgContext.draw(image, in: frame)
         }
+        // The basket bar floats over the map: draw its part of the SwiftUI layer again, on top.
+        if let bar = dragState?.barFrame, !bar.isEmpty, basket.items.count > 0 || dragState?.drag != nil {
+            let rect = NSRect(x: bar.minX, y: size.height - bar.maxY, width: bar.width, height: bar.height)
+            NSGraphicsContext.current?.cgContext.clip(to: rect)
+            rep.draw(in: NSRect(origin: .zero, size: size))
+        }
         NSGraphicsContext.restoreGraphicsState()
         try? out.representation(using: .png, properties: [:])?.write(to: url)
+    }
+
+    // MARK: Debug basket driver
+
+    /// Logs the presented sheet, then writes the same sheet view, hosted off screen, to `url` (a sheet on a locked
+    /// screen is never drawn).
+    func debugSheetSnapshot(to url: URL) {
+        debugLog.info("debug-basket: sheet presented \(self.window?.attachedSheet != nil), frame \(String(describing: self.window?.attachedSheet?.frame), privacy: .public)")
+        guard let ui else { return }
+        let view = ReviewSheetView(basket: basket, protected: { [weak self] in self?.driveController?.protectedHits ?? [] },
+                                   driveName: ui.driveName, driveConnected: model?.status != .offline,
+                                   move: { .driveGone($0, protected: []) }, close: {})
+        let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
+        host.appearance = window?.effectiveAppearance
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        host.layoutSubtreeIfNeeded()
+        host.frame.size = host.fittingSize
+        host.layoutSubtreeIfNeeded()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
+    }
+
+    /// The review sheet's move, as its button runs it: the checked trashable items, then the cleared ones leave the basket.
+    func debugMoveReviewed() async -> TrashOutcome {
+        let protected = driveController?.protectedHits ?? []
+        let items = ReviewSheet.trashable(basket.items, unchecked: [], protected: protected)
+        debugLog.info("debug-basket: moving \(items.map(\.path), privacy: .public)")
+        let outcome = await moveToTrash(items)
+        basket.remove(paths: outcome.cleared)
+        return outcome
+    }
+
+    func debugCloseReview() { ui?.reviewShown = false }
+
+    private func debugBasketLine(_ step: String) {
+        let items = basket.items.map(\.path)
+        debugLog.info("debug-basket: \(step, privacy: .public): \(items.count) items \(Format.gb(self.basket.total), privacy: .public) \(items, privacy: .public)")
+    }
+
+    /// A mouse event at `p` in the map view (top-left origin), handed straight to the map view (a locked screen
+    /// delivers no events to an inactive window).
+    private func postMouse(_ type: NSEvent.EventType, _ p: CGPoint) {
+        guard let window, let mapView,
+              let e = NSEvent.mouseEvent(with: type, location: mapView.convert(p, to: nil), modifierFlags: [],
+                                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                         context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+        else { return }
+        switch type {
+        case .leftMouseDown: mapView.mouseDown(with: e)
+        case .leftMouseDragged: mapView.mouseDragged(with: e)
+        default: mapView.mouseUp(with: e)
+        }
+    }
+
+    /// A point in the window content (top-left origin) in the map view's coordinates.
+    private func mapPoint(fromContent p: CGPoint) -> CGPoint? {
+        guard let content = window?.contentView, let mapView else { return nil }
+        let inContent = content.isFlipped ? p : CGPoint(x: p.x, y: content.bounds.height - p.y)
+        return mapView.convert(content.convert(inContent, to: nil), from: nil)
+    }
+
+    /// Drives the basket the way a user would, with synthetic keys and presses, writing PNGs to `dir`.
+    /// Paths are the DITrash fixture's.
+    func debugBasketDrive(to dir: URL) async {
+        guard let model, let window else { return }
+        func settle(_ ms: Int = 1500) async { try? await Task.sleep(for: .milliseconds(ms)) }
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(mapView)
+        basket.clear()
+
+        await model.open(path: "Users/u", select: "Users/u/movie.mov")
+        await settle()
+        debugLog.info("debug-basket: key window \(window.isKeyWindow), selected \(model.selected.map { model.snapshot?.nodes[$0].key ?? "?" } ?? "nil", privacy: .public), can add \(self.ui?.canAddSelection(model) ?? false)")
+        // A locked screen makes no window key, so keys go straight to the window's own key handling.
+        MapKey.command(keyCode: 51, modifiers: [], searchFocused: false).map(perform)
+        await settle(500)
+        debugBasketLine("after delete key")
+        debugSnapshot(to: dir.appending(path: "bar-1.png"))
+
+        let docker = "Users/u/Library/Containers/com.docker.docker/Data/Docker.raw"
+        await model.open(path: "Users/u/Library/Containers/com.docker.docker/Data", select: docker)
+        await settle()
+        MapKey.command(keyCode: 40, characters: "k", modifiers: .command, searchFocused: false).map(perform)
+        await settle(500)
+        debugLog.info("debug-basket: commands \(self.ui.map { $0.commands(model).map(\.title) } ?? [], privacy: .public)")
+        MapKey.command(keyCode: 36, modifiers: [], searchFocused: true).map(perform)
+        await settle(500)
+        debugBasketLine("after command bar")
+        debugSnapshot(to: dir.appending(path: "bar-2.png"))
+
+        model.zoom(to: nil)
+        await settle()
+        guard let snapshot = model.snapshot,
+              let users = (0..<snapshot.layout.topLevelCount).first(where: { snapshot.nodes[$0].key == "Users" }) else {
+            debugLog.info("debug-basket: no Users block")
+            return
+        }
+        let f = snapshot.layout.rects[users].frame
+        let c = CGPoint(x: f.midX, y: f.midY)
+        postMouse(.leftMouseDown, c)
+        postMouse(.leftMouseDragged, CGPoint(x: c.x + 1, y: c.y + 1))
+        postMouse(.leftMouseUp, CGPoint(x: c.x + 2, y: c.y))
+        await settle()
+        debugLog.info("debug-basket: after 2 pt press, zoom \(model.zoomPath, privacy: .public)")
+        debugBasketLine("after 2 pt press")
+        model.zoom(to: nil)
+        await settle()
+
+        let bar = dragState?.barFrame ?? .zero
+        guard let target = mapPoint(fromContent: CGPoint(x: bar.midX, y: bar.midY)) else { return }
+        debugLog.info("debug-basket: bar frame \(String(describing: bar), privacy: .public), target in map \(String(describing: target), privacy: .public)")
+        // Press and drag onto the bar, then hold so the PNG shows the bar as a target.
+        postMouse(.leftMouseDown, c)
+        for i in 1...8 {
+            postMouse(.leftMouseDragged, CGPoint(x: c.x + (target.x - c.x) * CGFloat(i) / 8, y: c.y + (target.y - c.y) * CGFloat(i) / 8))
+        }
+        await settle(800)
+        debugLog.info("debug-basket: dragging \(self.dragState?.drag.map { "active \($0.isActive) over \($0.dropsOnBasket(bar))" } ?? "none", privacy: .public)")
+        debugSnapshot(to: dir.appending(path: "dragging.png"))
+        postMouse(.leftMouseUp, target)
+        await settle(800)
+        debugBasketLine("after drop on bar")
+        debugSnapshot(to: dir.appending(path: "bar-3.png"))
+        presentReview()
+        await settle()
+        debugSheetSnapshot(to: dir.appending(path: "review-users.png"))
+        let sheet = ReviewSheet.make(items: basket.items, unchecked: [], protected: driveController?.protectedHits ?? [],
+                                     driveName: ui?.driveName ?? "", driveConnected: true)
+        for row in sheet.rows {
+            debugLog.info("debug-basket: row \(row.path, privacy: .public) checkable \(row.isCheckable) \(row.instruction ?? row.explanation, privacy: .public)")
+        }
+        debugCloseReview()
     }
     #endif
 
@@ -305,6 +502,7 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         model = nil
         ui = nil
         mapView = nil
+        dragState = nil
         onClose?()
     }
 }
