@@ -1,0 +1,16 @@
+// swift-tools-version: 6.0
+import PackageDescription
+
+let package = Package(
+    name: "DiskEngine",
+    platforms: [.macOS(.v14)],
+    products: [
+        .library(name: "DiskEngine", targets: ["DiskEngine"]),
+        .executable(name: "diskscan", targets: ["diskscan"]),
+    ],
+    targets: [
+        .target(name: "DiskEngine"),
+        .executableTarget(name: "diskscan", dependencies: ["DiskEngine"]),
+        .testTarget(name: "DiskEngineTests", dependencies: ["DiskEngine"]),
+    ]
+)
