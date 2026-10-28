@@ -218,8 +218,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let task = unmounts[uuid] { return task }
         guard let c = controllers[uuid] else { return nil }
         _ = try? registry.upsert(c.volume, space: c.space, now: .now)
-        // The map window holds this controller; it can't outlive the mount.
-        if mapWindow?.uuid == uuid { mapWindow?.close() }
+        // The map window lets go of this controller and says the drive was disconnected.
+        if let window = mapWindow, window.uuid == uuid, window.driveController === c { window.driveDisconnected() }
         let task = Task { [weak self] in
             await c.willUnmount()
             guard let self else { return }

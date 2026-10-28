@@ -119,3 +119,19 @@ import Testing
     #expect(MapModel.rehover(key: "b", in: gone) == nil)
     #expect(MapModel.rehover(key: nil, in: m.snapshot!) == nil)
 }
+
+// Ejecting keeps the window: the model lets go of the drive and says it was disconnected.
+@MainActor @Test func driveDisconnectedReleasesAndShowsOffline() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src, throttle: .milliseconds(10))
+    await m.open(path: "", select: nil); await m.settle()
+    src.activity = .offline
+    m.driveDisconnected()
+    #expect(src.holds == 0 && m.status == .offline && m.snapshot == nil)
+    #expect(m.statusMessage == "Test was disconnected. Its map comes back when you plug it in.")
+    // Later changes build nothing, and closing the window does not release twice.
+    let builds = src.builds
+    m.sourceChanged(); m.setSize(CGSize(width: 500, height: 500)); await m.settle()
+    m.close()
+    #expect(src.builds == builds && src.holds == 0 && m.status == .offline)
+}
+

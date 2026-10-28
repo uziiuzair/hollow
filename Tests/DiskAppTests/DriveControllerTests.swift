@@ -187,6 +187,34 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
     c.release(); await c.cool()
 }
 
+// Ejecting with the map open: the window's model ends offline with no map, and lets go of the drive.
+@MainActor @Test func unmountWithMapOpenEndsOffline() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000, "b/g.bin": 1_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    let m = MapModel(source: c, driveName: "Ext", reduceMotion: true, throttle: .milliseconds(10))
+    m.setSize(CGSize(width: 400, height: 300))
+    await m.open(path: "", select: nil); await m.settle()
+    #expect(m.status == .ready && c.holds == 1)
+    await c.willUnmount()
+    m.driveDisconnected()
+    await m.settle()
+    #expect(m.status == .offline && m.snapshot == nil && c.holds == 0)
+}
+
+// A build already reading the index when the unmount starts lands nothing.
+@MainActor @Test func buildInFlightAtUnmountReturnsNil() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.hold()
+    let request = MapRequest(path: "", size: CGSize(width: 400, height: 300), period: 7)
+    // The first build caches the baseline, so the next one goes straight to the index read.
+    #expect(await c.buildMap(request) != nil)
+    let build = Task { await c.buildMap(request) }
+    await Task.yield()
+    await c.willUnmount()
+    #expect(await build.value == nil)
+}
+
 // A drive with no history has no baseline; that answer is cached too.
 @MainActor @Test func nilBaselineIsCached() async throws {
     let root = try Fixtures.tree(["a/f.bin": 2_000_000])

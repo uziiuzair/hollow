@@ -181,6 +181,14 @@ public final class MapModel: ObservableObject {
         source.release()
     }
 
+    /// The drive is being unmounted: lets go of it and drops the map, but keeps saying
+    /// "<name> was disconnected" until the window closes. Nothing builds after this.
+    public func driveDisconnected() {
+        guard isOpen else { return }
+        close()
+        status = .offline
+    }
+
     /// Waits until no build is in flight or scheduled.
     func settle() async {
         while true {

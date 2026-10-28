@@ -201,7 +201,10 @@ extension DriveController: MapSource {
         guard !unmounting, let index else { return nil }
         let baseline = await baseline(days: request.period, from: index)
         guard !unmounting else { return nil }
-        return try? await index.read { MapBuilder.build(index: $0, request: request, baseline: baseline) }
+        let map = try? await index.read { MapBuilder.build(index: $0, request: request, baseline: baseline) }
+        // An unmount that began during the read: its map must not land.
+        guard !unmounting else { return nil }
+        return map
     }
 
     /// The history snapshot growth is measured from, cached per period and day.

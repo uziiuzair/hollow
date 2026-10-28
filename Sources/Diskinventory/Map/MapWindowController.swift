@@ -83,6 +83,12 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         Task { await model.open(path: path, select: select) }
     }
 
+    /// The drive is being unmounted. The window stays and says the drive was disconnected;
+    /// the model lets go of the drive and drops the map. A remount opens a new window.
+    func driveDisconnected() {
+        model?.driveDisconnected()
+    }
+
     // MARK: Glue
 
     private func observe(_ controller: DriveController, model: MapModel, ui: MapWindowState) {
