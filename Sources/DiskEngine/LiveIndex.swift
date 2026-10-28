@@ -695,9 +695,12 @@ public actor LiveIndex {
         currentEventIDHook = id
     }
 
-    /// The latest event ID on this volume's own stream, the scale its events (and so the drop rule) use.
+    /// The latest event ID on this volume's own stream, the scale its events (and so the drop rule) use. A volume that
+    /// has never logged an event has none (0, which would start the stream from now and lose the first scan's events);
+    /// device and host IDs come from one counter, so the host's latest stands in.
     private func currentEventID() -> UInt64 {
-        currentEventIDHook?() ?? FSEventsGetLastEventIdForDeviceBeforeTime(rootDevice, CFAbsoluteTimeGetCurrent())
+        let id = currentEventIDHook?() ?? FSEventsGetLastEventIdForDeviceBeforeTime(rootDevice, CFAbsoluteTimeGetCurrent())
+        return id != 0 ? id : FSEventsGetCurrentEventId()
     }
 
     /// Test hook: the lister every directory read goes through.

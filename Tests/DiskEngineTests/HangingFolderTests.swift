@@ -649,3 +649,59 @@ private func slowRead(_ seconds: Double) -> @Sendable (String, FolderID, @escapi
     #expect(await live.withIndex { $0.lastEventID } == 4_242)
     try await live.close()
 }
+
+/// Reports progress every 100 ms for `seconds`, then lists nothing: a huge folder on a slow network mount.
+private func drip(_ seconds: Double) -> @Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing {
+    { _, folder, progress in
+        for _ in 0..<Int(seconds * 10) {
+            progress()
+            usleep(100_000)
+        }
+        return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
+    }
+}
+
+@Test func aSaturatedPoolStillSkipsAtTheQueueLimit() async throws {
+    let folders = DirectoryLister(queueLimit: .seconds(1), read: drip(4))
+    for i in 0..<8 { Task { _ = await folders.list(path: "/drip/\(i)", folder: 0) } }
+    for _ in 0..<100 where folders.threadCount < 8 { try await Task.sleep(for: .milliseconds(10)) }
+    let started = ContinuousClock.now
+    if case .skipped = await folders.list(path: "/queued", folder: 0) {} else { Issue.record("not skipped") }
+    let waited = ContinuousClock.now - started
+    #expect(waited >= .milliseconds(900))
+    #expect(waited < .seconds(2))
+}
+
+@Test func abandonedThreadsDoNotKeepThePoolAlive() async throws {
+    let stuck = DispatchSemaphore(value: 0)
+    defer { stuck.signal() }
+    // Seven threads abandoned mid-read that keep reading, and one stuck in open() before its deadline.
+    let folders = DirectoryLister(timeout: .seconds(30), startTimeout: .seconds(1), idleTimeout: .milliseconds(50),
+                                  read: { path, folder, progress in
+        if path == "/stuck" {
+            stuck.wait()
+            return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
+        }
+        return drip(3)(path, folder, progress)
+    })
+    Task { _ = await folders.list(path: "/stuck", folder: 0) }
+    for i in 0..<7 { Task { _ = await folders.list(path: "/drip/\(i)", folder: 0) } }
+    for _ in 0..<100 where folders.abandonedCount < 7 { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(folders.abandonedCount == 7)
+    let started = ContinuousClock.now
+    if case .skipped = await folders.list(path: "/queued", folder: 0) {} else { Issue.record("not skipped") }
+    #expect(ContinuousClock.now - started < .seconds(2))
+}
+
+@Test func aNeverWrittenVolumeReplaysFromTheHostClock() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 10])
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir(), coalesceWindow: .seconds(10))
+    await live.injectCurrentEventID { 0 }
+    await live.disableWatcher()
+    let before = FSEventsGetCurrentEventId()
+    _ = try await live.open()
+    let start = await live.withIndex { $0.lastEventID }
+    #expect(start >= before && start > 0)
+    #expect(start <= FSEventsGetCurrentEventId())
+    try await live.close()
+}

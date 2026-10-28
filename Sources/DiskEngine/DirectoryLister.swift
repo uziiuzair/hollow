@@ -51,9 +51,12 @@ public struct ProtectedData: Sendable, Equatable {
 
 /// Lists directories on a fixed pool of `threads` listing threads, each listing under deadlines, so a folder that hangs
 /// in the kernel (a privacy prompt that can't show, a File Provider folder, a dead mount) costs its caller seconds, not
-/// minutes. Three deadlines, each giving up on the caller's behalf while the thread, if it has one, is left blocked:
+/// minutes. Four deadlines, each giving up on the caller's behalf while the thread, if it has one, is left blocked:
 /// - a request that hasn't started `startTimeout` after it was made is skipped, but only once the pool is stuck: every
-///   thread hung, or none finished or read a batch in the last `startTimeout`. A pool that is only busy keeps it queued;
+///   thread hung, or none finished or read a batch for a live request in the last `startTimeout`. A pool that is only
+///   busy keeps it queued;
+/// - however busy the pool, a request still queued `queueLimit` after it was made is skipped, so its caller's wait is
+///   bounded even while other volumes' slow reads keep every thread making progress;
 /// - open() must return within `timeout` of the thread starting the request;
 /// - after that, each `getattrlistbulk` batch must return within `idleTimeout` of the last (a dead network mount).
 ///
@@ -77,6 +80,7 @@ public final class DirectoryLister: @unchecked Sendable {
     public let threads: Int
     public let timeout: Duration
     public let startTimeout: Duration
+    public let queueLimit: Duration
     public let idleTimeout: Duration
     public let skipFor: Duration
     private let now: @Sendable () -> ContinuousClock.Instant
@@ -92,6 +96,8 @@ public final class DirectoryLister: @unchecked Sendable {
         var folder: FolderID
         var phase: Phase
         var deadline: DispatchTime
+        /// When a queued request is skipped however busy the pool is.
+        var giveUp: DispatchTime
         var continuation: CheckedContinuation<Outcome, Never>
     }
 
@@ -121,13 +127,14 @@ public final class DirectoryLister: @unchecked Sendable {
     /// `now` (tests) is the clock `skipFor` is measured with; deadlines always use the real one. `read` must call its
     /// third argument when open() returns and after each batch it reads.
     public init(threads: Int = 8, timeout: Duration = .seconds(5), startTimeout: Duration = .seconds(5),
-                idleTimeout: Duration = .seconds(30), skipFor: Duration = .seconds(600),
+                queueLimit: Duration = .seconds(60), idleTimeout: Duration = .seconds(30), skipFor: Duration = .seconds(600),
                 now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
                 read: @escaping @Sendable (String, FolderID, @escaping @Sendable () -> Void) -> DirectoryListing
                     = DirectoryLister.read) {
         self.threads = max(1, threads)
         self.timeout = timeout
         self.startTimeout = startTimeout
+        self.queueLimit = queueLimit
         self.idleTimeout = idleTimeout
         self.skipFor = skipFor
         self.now = now
@@ -177,8 +184,10 @@ public final class DirectoryLister: @unchecked Sendable {
                 }
                 busy.insert(path)
                 nextTicket += 1
+                let made = DispatchTime.now()
                 requests[nextTicket] = Request(path: path, folder: folder, phase: .queued,
-                                               deadline: .now() + Self.interval(startTimeout), continuation: continuation)
+                                               deadline: made + Self.interval(min(startTimeout, queueLimit)),
+                                               giveUp: made + Self.interval(queueLimit), continuation: continuation)
                 queue.append(nextTicket)
                 if queue.count > idle, running < threads {
                     running += 1
@@ -232,8 +241,9 @@ public final class DirectoryLister: @unchecked Sendable {
     /// open() returned, or a batch was read: the request is alive, and has `idleTimeout` for the next batch.
     private func progress(_ ticket: UInt64) {
         condition.withLock {
-            lastProgress = .now()
+            // An abandoned thread reading on says nothing about whether the pool will get to the queue.
             guard requests[ticket] != nil else { return }
+            lastProgress = .now()
             requests[ticket]!.phase = .reading
             requests[ticket]!.deadline = .now() + Self.interval(idleTimeout)
             armWatchdog()
@@ -280,13 +290,13 @@ public final class DirectoryLister: @unchecked Sendable {
                 skipUntil[request.path] = now() + skipFor
                 given.append((request, .timedOut))
             }
-            // A queued request past its deadline waits on while threads still finish or read; once every thread hung,
-            // or none has for `startTimeout`, it is skipped. Never started: no thread to leave behind.
+            // A queued request past its deadline waits on while threads still finish or read, up to `queueLimit`; once
+            // every thread hung, or none has for `startTimeout`, it is skipped. Never started: no thread to leave behind.
             let drained = hung.count >= threads
             let stalled = lastProgress + Self.interval(startTimeout)
             for (ticket, request) in requests where request.phase == .queued && (drained || request.deadline <= current) {
-                if !drained, stalled > current {
-                    requests[ticket]!.deadline = stalled
+                if !drained, stalled > current, request.giveUp > current {
+                    requests[ticket]!.deadline = min(stalled, request.giveUp)
                     continue
                 }
                 requests[ticket] = nil
