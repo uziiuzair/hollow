@@ -16,7 +16,7 @@ import Testing
     try Fixtures.write(root.appending(path: "a/g.bin"), bytes: 1_200_000)
     let next = await live.withIndex { $0.lastEventID } + 1_000_000_000
     try await live.apply([FSChange(path: Fixtures.realPath(root) + "/a", id: next, rescanSubtree: false, historyLost: false)])
-    #expect((await updates.next() ?? 0) >= 1)
+    #expect((await updates.next()?.generation ?? 0) >= 1)
     try await live.close()
     // The live watcher and compaction may buffer further values; the stream must still end.
     let ended = try await withThrowingTaskGroup(of: Bool.self) { group in

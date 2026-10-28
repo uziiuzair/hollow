@@ -182,9 +182,22 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
     #expect(s.total > 0 && s.layout.topLevelCount >= 1)
     let before = c.generation
     try Data(count: 2_000_000).write(to: root.appending(path: "new.bin"))
-    for _ in 0..<50 where c.generation == before { try await Task.sleep(for: .milliseconds(100)) }
+    // Up to the watcher's latency plus one coalescing window: a folder applied in the last 10 s waits out the window.
+    for _ in 0..<200 where c.generation == before { try await Task.sleep(for: .milliseconds(100)) }
     #expect(c.generation > before)
+    #expect(c.lastChange != nil)
+    #expect(c.takeChange() != nil && c.takeChange() == nil)
     c.release(); await c.cool()
+}
+
+// Two updates before the map reads them: neither is lost (C16).
+@MainActor @Test func changesMergeUntilTaken() async throws {
+    let c = DriveController(volume: try Fixtures.volume(try Fixtures.tree(["a/f.bin": 10])), store: try Fixtures.tempDir())
+    c.receive(IndexChange(generation: 1, folders: ["a/x": 5]))
+    c.receive(IndexChange(generation: 2, folders: ["b": 7]))
+    #expect(c.generation == 2 && c.lastChange == IndexChange(generation: 2, folders: ["b": 7]))
+    #expect(c.takeChange() == IndexChange(generation: 2, folders: ["a/x": 5, "b": 7]))
+    #expect(c.takeChange() == nil)
 }
 
 // Ejecting with the map open: the window's model ends offline with no map, and lets go of the drive.

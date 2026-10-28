@@ -43,7 +43,7 @@ public final class EventWatcher: @unchecked Sendable {
     // Touched only from start()/stop(), which callers don't race.
     private var stream: FSEventStreamRef?
 
-    public init(device: dev_t, since: UInt64, latency: Double = 2.0) {
+    public init(device: dev_t, since: UInt64, latency: Double = 3.0) {
         self.device = device
         self.since = since
         self.latency = latency

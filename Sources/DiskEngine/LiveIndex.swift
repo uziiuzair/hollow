@@ -8,6 +8,69 @@ public enum OpenedFrom: Sendable, Equatable {
     case fullScan(reason: String)
 }
 
+/// What one update of a `LiveIndex` changed.
+public struct IndexChange: Equatable, Sendable {
+    public var generation: Int
+    /// Relative paths of the outermost changed folders ("" is the root), each with the change in its total. A path whose
+    /// ancestor is also changed is not listed. Nil when anything may have changed: a full rescan, a compaction, an
+    /// exclusions change, a retry of unreadable folders.
+    public var folders: [String: Int64]?
+
+    public init(generation: Int, folders: [String: Int64]?) {
+        self.generation = generation
+        self.folders = folders
+    }
+
+    /// Both changes as one (C16): nil folders win; otherwise each outermost path carries every delta at or below it.
+    public func merged(with later: IndexChange) -> IndexChange {
+        guard let mine = folders, let theirs = later.folders else { return IndexChange(generation: later.generation, folders: nil) }
+        var sums = mine
+        for (path, delta) in theirs { sums[path, default: 0] &+= delta }
+        return IndexChange(generation: later.generation, folders: Self.outermost(sums))
+    }
+
+    /// Drops every path that has an ancestor in `deltas`, adding its delta to that ancestor's.
+    static func outermost(_ deltas: [String: Int64]) -> [String: Int64] {
+        var result: [String: Int64] = [:]
+        for (path, delta) in deltas {
+            result[outermostAncestor(of: path) { deltas[$0] != nil }, default: 0] &+= delta
+        }
+        return result
+    }
+
+    /// The shallowest relative path at or above `path` ("" is above everything) for which `present` holds; `path` itself
+    /// when none above it does. Walks the path's own prefixes, so it costs its depth, not the number of paths.
+    static func outermostAncestor(of path: String, where present: (String) -> Bool) -> String {
+        guard !path.isEmpty else { return path }
+        if present("") { return "" }
+        var index = path.startIndex
+        while let slash = path[index...].firstIndex(of: "/") {
+            let prefix = String(path[..<slash])
+            if present(prefix) { return prefix }
+            index = path.index(after: slash)
+        }
+        return path
+    }
+}
+
+/// What `LiveIndex.apply` has done since the index was created.
+public struct ApplyStats: Equatable, Sendable {
+    public var applies: Int
+    public var foldersRelisted: Int
+    public var subtreesRescanned: Int
+    public var fullRescans: Int
+    /// Time spent applying changes.
+    public var busy: Duration
+
+    public init(applies: Int, foldersRelisted: Int, subtreesRescanned: Int, fullRescans: Int, busy: Duration) {
+        self.applies = applies
+        self.foldersRelisted = foldersRelisted
+        self.subtreesRescanned = subtreesRescanned
+        self.fullRescans = fullRescans
+        self.busy = busy
+    }
+}
+
 /// Keeps one volume's index on disk and current: loads or scans it, resumes unfinished
 /// scans, follows FSEvents from the stored event ID, re-lists only folders that
 /// changed, saves on a debounce, and compacts when garbage builds up.
@@ -38,10 +101,23 @@ public actor LiveIndex {
     /// `ContentKind.totals` for the current index; nil after anything changes it.
     var cachedKinds: [ContentKind: UInt64]?
     private var generation = 0
-    private var subscribers: [UUID: AsyncStream<Int>.Continuation] = [:]
+    private var subscribers: [UUID: AsyncStream<IndexChange>.Continuation] = [:]
     var kindsComputations = 0
     /// Folders relisted by `apply` (not by exclusion changes or scans).
     var relistCount = 0
+    private var applies = 0
+    private var subtreeCount = 0
+    private var fullRescanCount = 0
+    private var busyTime: Duration = .zero
+    /// A folder applied within this window of its last apply waits until the window has passed (background churn).
+    private let coalesceWindow: Duration
+    /// Changes waiting out the window, by path, merged: the highest ID, flags OR-ed.
+    private var deferred: [String: FSChange] = [:]
+    /// When each recently changed path was last applied. Entries older than the window are pruned.
+    private var lastRelist: [String: ContinuousClock.Instant] = [:]
+    private var flushTask: Task<Void, Never>?
+    private var now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
+    private var mountPointLookup: @Sendable (String) -> String? = { EventPathMapper.mountPoint(of: $0) }
     /// Relative paths the index leaves out; what the index currently reflects.
     private var exclusions: Set<String>
     /// What `exclusions.json` last held, so a save rewrites it only when it differs.
@@ -49,7 +125,8 @@ public actor LiveIndex {
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     public init(volumeRoot: URL, store: URL, saveDebounce: Duration = .seconds(30), compactAbove: Double = 0.25,
-                exclusions: Set<String> = []) {
+                exclusions: Set<String> = [], coalesceWindow: Duration = .seconds(10)) {
+        self.coalesceWindow = coalesceWindow
         self.exclusions = ExclusionPaths.normalized(exclusions)
         self.volumeRoot = volumeRoot
         self.store = store
@@ -117,12 +194,12 @@ public actor LiveIndex {
         do {
             try await reconcile(from: old, in: index)
         } catch {
-            indexChanged()
+            indexChanged(folders: nil)
             needsFullRescan = true
             unlink(store.appending(path: ScanIndex.snapshotName).path)
             throw error
         }
-        indexChanged()
+        indexChanged(folders: nil)
         // exclusions.json follows the snapshot (saveLocked), so a crash before then reconciles again on reopen.
         scheduleSave()
     }
@@ -151,7 +228,7 @@ public actor LiveIndex {
             try await scan(index, starting: toScan)
         }
         if readable > 0 {
-            indexChanged()
+            indexChanged(folders: nil)
             scheduleSave()
         }
         return readable
@@ -171,7 +248,9 @@ public actor LiveIndex {
         let journal = EventWatcher.journalUUID(device: device)
         // The device's real mount point ("/System/Volumes/Data" for the internal disk, where the
         // volume URL says "/"): FSEvents device streams report paths relative to it.
-        mountPoint = EventPathMapper.mountPoint(of: rootPath) ?? "/"
+        // No fallback: a wrong mount point would silently drop every event for the volume.
+        guard let mount = mountPointLookup(rootPath) else { throw DiskEngineError.posix("statfs \(rootPath)", errno) }
+        mountPoint = mount
 
         cachedKinds = nil
         var reason: String?
@@ -230,14 +309,25 @@ public actor LiveIndex {
 
     /// Applies changed folders. Paths are absolute; ones outside the root are ignored.
     public func apply(_ changes: [FSChange]) async throws {
+        try await apply(changes, advanceTo: changes.map(\.id).max() ?? 0)
+    }
+
+    /// Applies changed folders, then advances the stored event ID to `eventID` (never back).
+    func apply(_ changes: [FSChange], advanceTo eventID: UInt64) async throws {
         await lock()
         defer { unlock() }
         guard !closed, let index, !changes.isEmpty else { return }
-        let maxID = changes.map(\.id).max() ?? index.lastEventID
         do {
-            if try await applyLocked(changes, to: index) { indexChanged() }
+            let start = ContinuousClock.now
+            let outcome = try await applyLocked(changes, to: index)
+            busyTime += ContinuousClock.now - start
+            switch outcome {
+            case .untouched: break
+            case .full: indexChanged(folders: nil)
+            case .folders(let deltas): indexChanged(folders: deltas)
+            }
         } catch {
-            indexChanged()
+            indexChanged(folders: nil)
             // Part of the change may be in the index; drop the snapshot so a crash means a
             // full rescan, and rescan on the next apply. The event ID stays put.
             needsFullRescan = true
@@ -245,18 +335,104 @@ public actor LiveIndex {
             throw error
         }
         // Advance only after the changes are in the index (spec 6.6).
-        index.lastEventID = max(index.lastEventID, maxID)
+        index.lastEventID = max(index.lastEventID, eventID)
         scheduleSave()
     }
 
-    /// Returns false when nothing in the index was touched (every path outside the root).
-    private func applyLocked(_ changes: [FSChange], to index: ScanIndex) async throws -> Bool {
+    /// Takes a batch from the watcher. A folder applied within `coalesceWindow` waits until the window has passed, so a
+    /// folder another app writes to every second costs one relist per window. Subtree rescans and lost history never
+    /// wait, and a busy folder never holds up another.
+    func enqueue(_ changes: [FSChange]) async {
+        guard !closed else { return }
+        let now = self.now()
+        var due: [FSChange] = []
+        for change in changes {
+            if change.historyLost || change.rescanSubtree {
+                // The rescan covers a relist of the same folder that is waiting out its window.
+                if let waiting = deferred.removeValue(forKey: change.path) { due.append(waiting) }
+                due.append(change)
+                lastRelist[change.path] = now
+            } else if let last = lastRelist[change.path], now - last < coalesceWindow {
+                deferred[change.path] = deferred[change.path].map { Self.merged($0, change) } ?? change
+            } else {
+                // Leading edge: the first change in a while applies at once.
+                due.append(change)
+                lastRelist[change.path] = now
+            }
+        }
+        // A full rescan covers everything waiting.
+        if due.contains(where: \.historyLost) {
+            due += deferred.values
+            deferred = [:]
+        }
+        if let applied = due.map(\.id).max() {
+            try? await apply(due, advanceTo: min(applied, deferredFloor))
+        }
+        scheduleFlush()
+    }
+
+    /// Applies the deferred changes whose window has passed. Called by the flush timer, and by tests.
+    func flushDue() async {
+        guard !closed else { return }
+        let now = self.now()
+        let due = deferred.values.filter { change in lastRelist[change.path].map { now - $0 >= coalesceWindow } ?? true }
+        for change in due {
+            deferred[change.path] = nil
+            lastRelist[change.path] = now
+        }
+        if let applied = due.map(\.id).max() {
+            try? await apply(due, advanceTo: min(applied, deferredFloor))
+        }
+        scheduleFlush()
+    }
+
+    /// One timer, due when the earliest deferred change's window ends. Prunes paths whose window has passed.
+    private func scheduleFlush() {
+        flushTask?.cancel()
+        flushTask = nil
+        guard !closed else { return }
+        let now = self.now()
+        lastRelist = lastRelist.filter { path, last in deferred[path] != nil || now - last < coalesceWindow }
+        guard !deferred.isEmpty else { return }
+        let end = deferred.keys.compactMap { lastRelist[$0] }.min().map { $0 + coalesceWindow } ?? now
+        let delay = max(end - now, .zero)
+        flushTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            await self?.flushDue()
+        }
+    }
+
+    /// The highest event ID the stored one may reach: just below the oldest change still deferred (spec 6.6). Quitting
+    /// drops those, and the next open replays them from the stored ID. Taken when a batch is formed, before its apply
+    /// waits for the lock, so a flush already queued ahead of it is still counted.
+    private var deferredFloor: UInt64 {
+        deferred.values.map(\.id).min().map { $0 - 1 } ?? .max
+    }
+
+    private static func merged(_ a: FSChange, _ b: FSChange) -> FSChange {
+        FSChange(path: a.path, id: max(a.id, b.id), rescanSubtree: a.rescanSubtree || b.rescanSubtree,
+                 historyLost: a.historyLost || b.historyLost)
+    }
+
+    /// What one `apply` did to the index.
+    private enum ApplyOutcome {
+        /// Every path was outside the root or excluded.
+        case untouched
+        case full
+        /// The outermost folders touched, by relative path, with the change in each one's total.
+        case folders([String: Int64])
+    }
+
+    private func applyLocked(_ changes: [FSChange], to index: ScanIndex) async throws -> ApplyOutcome {
+        applies += 1
         if needsFullRescan || changes.contains(where: \.historyLost) {
+            fullRescanCount += 1
             index.resetContents(of: 0)
             try fault?()
             try await scan(index, starting: [0])
             needsFullRescan = false
-            return true
+            return .full
         } else {
             var relists: Set<FolderID> = []
             var subtrees: Set<FolderID> = []
@@ -266,11 +442,19 @@ public actor LiveIndex {
                 if change.rescanSubtree { subtrees.insert(folder) } else { relists.insert(folder) }
             }
 
+            guard !relists.isEmpty || !subtrees.isEmpty else { return .untouched }
+            // The outermost touched folders, and their totals before, to report the change in each.
+            var paths: [String: FolderID] = [:]
+            for folder in relists.union(subtrees) { paths[index.relativePath(of: folder)] = folder }
+            let outer = paths.filter { path, _ in IndexChange.outermostAncestor(of: path) { paths[$0] != nil } == path }
+            let before = outer.mapValues { index.folders[Int($0)].totalAllocated }
+
             var toScan: [FolderID] = []
             // Shallow first, so a reset ancestor turns its descendants into garbage first.
             for folder in subtrees.sorted(by: { depth($0, index) < depth($1, index) })
             where !index.folders[Int(folder)].flags.contains(.garbage) {
                 index.resetContents(of: folder)
+                subtreeCount += 1
                 toScan.append(folder)
             }
             var reader = BulkDirectoryReader()
@@ -281,7 +465,10 @@ public actor LiveIndex {
             }
             try fault?()
             if !toScan.isEmpty { try await scan(index, starting: toScan) }
-            return !relists.isEmpty || !subtrees.isEmpty
+            return .folders(outer.reduce(into: [:]) { result, entry in
+                let after = index.folders[Int(entry.value)].totalAllocated
+                result[entry.key] = Int64(bitPattern: after &- before[entry.key]!)
+            })
         }
     }
 
@@ -295,6 +482,22 @@ public actor LiveIndex {
     /// Test hook: runs inside the next applies after the index has been changed.
     func injectFault(_ fault: (@Sendable () throws -> Void)?) {
         self.fault = fault
+    }
+
+    /// Test hook: replaces `statfs` for finding the root's mount point.
+    func injectMountPointLookup(_ lookup: @escaping @Sendable (String) -> String?) {
+        mountPointLookup = lookup
+    }
+
+    /// Test hook: the clock the coalescing window is measured with.
+    func injectClock(_ now: @escaping @Sendable () -> ContinuousClock.Instant) {
+        self.now = now
+    }
+
+    /// What `apply` has done so far. `foldersRelisted` counts folders relisted by `apply` only.
+    public func stats() -> ApplyStats {
+        ApplyStats(applies: applies, foldersRelisted: relistCount, subtreesRescanned: subtreeCount,
+                   fullRescans: fullRescanCount, busy: busyTime)
     }
 
     /// Test hook: runs before every scan starts.
@@ -321,7 +524,7 @@ public actor LiveIndex {
             try? FileManager.default.removeItem(at: temp)
             current = compacted
             index = compacted
-            indexChanged()
+            indexChanged(folders: nil)
         }
         try current.save(to: store)
         // After the snapshot: a crash between the two only costs one redundant, idempotent reconcile.
@@ -338,9 +541,14 @@ public actor LiveIndex {
         watcher?.stop()
         watchTask?.cancel()
         saveTask?.cancel()
+        flushTask?.cancel()
         watcher = nil
         watchTask = nil
         saveTask = nil
+        flushTask = nil
+        // Their IDs are above the stored event ID, so the next open replays them.
+        deferred = [:]
+        lastRelist = [:]
         try saveLocked()
     }
 
@@ -377,11 +585,11 @@ public actor LiveIndex {
         return try body(index)
     }
 
-    /// A rising generation (from 1) each time the index changes after `open()`: an apply
-    /// that touched it, or a compaction. Finishes on `close()`.
-    public func updates() -> AsyncStream<Int> {
+    /// One change, with a rising generation (from 1), each time the index changes after `open()`: an apply that touched
+    /// it, a compaction, an exclusions change or a retry of unreadable folders. Finishes on `close()`.
+    public func updates() -> AsyncStream<IndexChange> {
         let id = UUID()
-        let (stream, continuation) = AsyncStream<Int>.makeStream()
+        let (stream, continuation) = AsyncStream<IndexChange>.makeStream()
         if closed {
             continuation.finish()
             return stream
@@ -407,10 +615,11 @@ public actor LiveIndex {
         subscribers[id] = nil
     }
 
-    private func indexChanged() {
+    private func indexChanged(folders: [String: Int64]?) {
         cachedKinds = nil
         generation += 1
-        for continuation in subscribers.values { continuation.yield(generation) }
+        let change = IndexChange(generation: generation, folders: folders)
+        for continuation in subscribers.values { continuation.yield(change) }
     }
 
     var history: HistoryStore { HistoryStore(directory: store.appending(path: "history")) }
@@ -481,7 +690,7 @@ public actor LiveIndex {
                     }
                 }
                 guard !absolute.isEmpty else { continue }
-                try? await self?.apply(absolute)
+                await self?.enqueue(absolute)
             }
         }
     }

@@ -16,6 +16,10 @@ public final class DriveController: ObservableObject {
     @Published public private(set) var activity: DriveActivity = .idle
     /// Rises by one each time the open index changes, across re-warms.
     @Published public private(set) var generation = 0
+    /// What the open index's last update changed; set just before `generation` rises.
+    @Published public private(set) var lastChange: IndexChange?
+    /// Every update since the last `takeChange()`, merged, so a reader that falls behind loses none (C16).
+    private var pendingChange: IndexChange?
     /// The cleanup lens over the open index. Kept across a cool, so the dropdown still has it.
     @Published public private(set) var lens: LensReport?
     /// Every app-managed hit of the last lens walk, of any size and uncapped: the `protected` set for the review sheet and
@@ -186,7 +190,7 @@ public final class DriveController: ObservableObject {
                 }
                 let updates = await live.updates()
                 watching = Task { [weak self] in
-                    for await _ in updates { self?.generation += 1 }
+                    for await change in updates { self?.receive(change) }
                 }
             } catch {
                 opening = nil
@@ -202,6 +206,25 @@ public final class DriveController: ObservableObject {
         restartTimer()
         // Its own task, so the walk (it holds the index lock) never delays `.ready` or the first map build.
         lensTask = Task { await self.refreshLens() }
+    }
+
+    /// One update of the open index.
+    func receive(_ change: IndexChange) {
+        pendingChange = pendingChange.map { $0.merged(with: change) } ?? change
+        lastChange = change
+        generation += 1
+    }
+
+    /// Everything the index changed since the last call, merged into one change, or nil when nothing did. Clears it.
+    public func takeChange() -> IndexChange? {
+        defer { pendingChange = nil }
+        return pendingChange
+    }
+
+    /// What the open index's applies have done since it opened; nil while the drive is cold.
+    public func applyStats() async -> ApplyStats? {
+        guard let index else { return nil }
+        return await index.stats()
     }
 
     /// Tests only: waits for the lens walk started by the last warm.

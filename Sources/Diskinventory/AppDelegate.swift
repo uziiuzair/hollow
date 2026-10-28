@@ -164,6 +164,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             startHeartbeat()
             DispatchQueue.main.async { [weak self] in self?.openMap(uuid: id, focus: nil) }
         }
+        // --apply-stats: every 60 s, what each warm drive's index applied since the last line.
+        if CommandLine.arguments.contains("--apply-stats") {
+            startApplyStats()
+        }
         // --map-snapshot <dir>: with --show-map, writes the window's PNGs once the map is drawn.
         if let i = CommandLine.arguments.firstIndex(of: "--map-snapshot"), i + 1 < CommandLine.arguments.count {
             debugSnapshotDir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
@@ -633,6 +637,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var heartbeatLast = 0.0
     private var heartbeatLongest = 0.0
+    private var applyStatsTimer: Timer?
+    /// The stats each drive's line was last measured from, by uuid.
+    private var lastApplyStats: [String: ApplyStats] = [:]
+    private let indexLog = Logger(subsystem: AppIdentity.bundleID, category: "index")
+
+    private func startApplyStats() {
+        applyStatsTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.logApplyStats() }
+        }
+    }
+
+    private func logApplyStats() {
+        let all = controllers
+        Task { @MainActor in
+            for (uuid, c) in all.sorted(by: { $0.key < $1.key }) {
+                guard let now = await c.applyStats() else { lastApplyStats[uuid] = nil; continue }
+                // A re-opened index counts from zero again.
+                var last = lastApplyStats[uuid] ?? ApplyStats(applies: 0, foldersRelisted: 0, subtreesRescanned: 0,
+                                                              fullRescans: 0, busy: .zero)
+                if now.applies < last.applies {
+                    last = ApplyStats(applies: 0, foldersRelisted: 0, subtreesRescanned: 0, fullRescans: 0, busy: .zero)
+                }
+                lastApplyStats[uuid] = now
+                let ms = Int((now.busy - last.busy) / .milliseconds(1))
+                indexLog.info("""
+                    apply stats \(c.volume.name, privacy: .public): \(now.applies - last.applies) applies, \
+                    \(now.foldersRelisted - last.foldersRelisted) relists, \(now.subtreesRescanned - last.subtreesRescanned) subtrees, \
+                    \(now.fullRescans - last.fullRescans) full, \(ms) ms busy
+                    """)
+            }
+        }
+    }
 
     private func beat() {
         let now = CACurrentMediaTime()
