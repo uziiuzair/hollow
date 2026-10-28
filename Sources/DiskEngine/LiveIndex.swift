@@ -158,6 +158,9 @@ public actor LiveIndex {
     /// their events count as applied (with what the folder had), so they never hold back the stored event ID.
     private var staleRetry: [String: ContinuousClock.Instant] = [:]
     private var lister = DirectoryLister.shared
+    /// The QoS listings run at: userInitiated (open, exclusions, the unreadable retry, which someone waits for), and
+    /// utility while an apply from the watcher or the flush timer holds the lock.
+    private var listingQoS = QOS_CLASS_USER_INITIATED
     /// Privacy-protected folders, never opened while `fullDiskAccess` says no (they'd wait on a privacy prompt).
     private let protectedData: ProtectedData?
     private let fullDiskAccess: @Sendable () -> Bool
@@ -390,8 +393,16 @@ public actor LiveIndex {
     func apply(_ changes: [FSChange], advanceTo eventID: UInt64, routed: Bool = false) async throws {
         await lock()
         defer { unlock() }
+        try await applyHoldingLock(changes, advanceTo: eventID, routed: routed)
+    }
+
+    /// `apply`, for a caller that already holds the lock.
+    private func applyHoldingLock(_ changes: [FSChange], advanceTo eventID: UInt64, routed: Bool,
+                                  background: Bool = false) async throws {
         guard !closed, let index, !changes.isEmpty else { return }
         defer { armStaleRetries(index) }
+        listingQoS = background ? QOS_CLASS_UTILITY : QOS_CLASS_USER_INITIATED
+        defer { listingQoS = QOS_CLASS_USER_INITIATED }
         do {
             let start = ContinuousClock.now
             let outcome = try await applyLocked(changes, to: index, routed: routed)
@@ -425,12 +436,12 @@ public actor LiveIndex {
     /// name. A folder that keeps changing waits longer each time (10 s, 20 s… up to 5 min) until a window passes quietly.
     /// Subtree rescans and lost history never wait, and a busy folder never holds up another.
     func enqueue(_ changes: [FSChange]) async {
-        guard !closed else { return }
-        // The folder each change relists, looked up while no apply or scan is changing the index.
+        // One locked section: the keys are looked up while no apply or scan is changing the index, and the batch, its
+        // event-ID floor and its apply follow with no other batch in between.
         await lock()
-        let keys = changes.map { $0.historyLost ? $0.path : folderKey($0.path) }
-        unlock()
+        defer { unlock() }
         guard !closed else { return }
+        let keys = changes.map { $0.historyLost ? $0.path : folderKey($0.path) }
         let now = self.now()
         var due: [FSChange] = []
         #if DEBUG
@@ -480,13 +491,16 @@ public actor LiveIndex {
             }
         }
         if let applied = due.map(\.id).max() {
-            try? await apply(due, advanceTo: min(applied, deferredFloor), routed: true)
+            try? await applyHoldingLock(due, advanceTo: min(applied, deferredFloor), routed: true, background: true)
         }
         scheduleFlush()
     }
 
-    /// Applies the deferred changes whose window has passed. Called by the flush timer, and by tests.
+    /// Applies the deferred changes whose window has passed. Called by the flush timer, and by tests. Like `enqueue`,
+    /// one locked section from choosing the changes to applying them.
     func flushDue() async {
+        await lock()
+        defer { unlock() }
         guard !closed else { return }
         let now = self.now()
         var due: [FSChange] = []
@@ -503,7 +517,7 @@ public actor LiveIndex {
             due.append(FSChange(path: path, id: 0, rescanSubtree: false, historyLost: false))
         }
         if let applied = due.map(\.id).max() {
-            try? await apply(due, advanceTo: min(applied, deferredFloor), routed: true)
+            try? await applyHoldingLock(due, advanceTo: min(applied, deferredFloor), routed: true, background: true)
         }
         scheduleFlush()
     }
@@ -559,8 +573,8 @@ public actor LiveIndex {
     }
 
     /// The highest event ID the stored one may reach: just below the oldest change still deferred (spec 6.6). Quitting
-    /// drops those, and the next open replays them from the stored ID. Taken when a batch is formed, before its apply
-    /// waits for the lock, so a flush already queued ahead of it is still counted.
+    /// drops those, and the next open replays them from the stored ID. Taken with the lock held, between forming a batch
+    /// and applying it, so no change another batch has taken but not yet applied can be missed.
     private var deferredFloor: UInt64 {
         coalesced.values.compactMap(\.waiting?.id).min().map { $0 - 1 } ?? .max
     }
@@ -600,7 +614,7 @@ public actor LiveIndex {
         if protectedGuard()?.covers(path) == true {
             return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
         }
-        let outcome = await lister.list(path: path, folder: folder)
+        let outcome = await lister.list(path: path, folder: folder, qos: listingQoS)
         guard case .listed(let listing) = outcome else {
             #if DEBUG
             Self.log.info("relist \(String(describing: outcome), privacy: .public): \(path, privacy: .public)")
@@ -983,7 +997,9 @@ public actor LiveIndex {
         let path = rootPath
         let device = rootDevice
         beforeScan?()
-        _ = try await DiskScanner(root: URL(filePath: rootPath), storage: store, lister: lister, protected: protectedGuard())
+        let scanner = DiskScanner(root: URL(filePath: rootPath), storage: store, lister: lister,
+                                  protected: protectedGuard(), qos: listingQoS)
+        _ = try await scanner
             .scan(into: target, starting: starting) { checkpointed in
                 // Folders listed after the volume went away read as vanished; stop, don't save.
                 guard Self.isPresent(path, device: device) else { return .stop }

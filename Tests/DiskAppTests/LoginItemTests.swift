@@ -11,8 +11,8 @@ final class MemoryFlags: FlagStore {
 @Test func registersOnlyOnce() throws {
     let d = MemoryFlags()
     var calls = 0
-    try LoginItem.registerOnFirstRun(defaults: d) { calls += 1 }
-    try LoginItem.registerOnFirstRun(defaults: d) { calls += 1 }
+    LoginItem.registerOnFirstRun(defaults: d) { calls += 1 }
+    LoginItem.registerOnFirstRun(defaults: d) { calls += 1 }
     #expect(calls == 1)
 }
 

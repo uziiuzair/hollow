@@ -26,16 +26,20 @@ public final class DiskScanner: Sendable {
     public let lister: DirectoryLister
     /// Read as unreadable without being opened (no Full Disk Access); nil opens everything.
     public let protected: ProtectedData?
+    /// The QoS the listings run at: userInitiated for a scan someone waits for, utility for a live index's applies.
+    public let qos: qos_class_t
     public let progress: AsyncStream<ScanProgress>
     private let progressSink: AsyncStream<ScanProgress>.Continuation
 
     public init(root: URL, storage: URL, workers: Int = ProcessInfo.processInfo.activeProcessorCount,
-                lister: DirectoryLister = .shared, protected: ProtectedData? = nil) {
+                lister: DirectoryLister = .shared, protected: ProtectedData? = nil,
+                qos: qos_class_t = QOS_CLASS_USER_INITIATED) {
         self.root = root
         self.storage = storage
         self.workers = max(1, min(workers, lister.threads))
         self.lister = lister
         self.protected = protected
+        self.qos = qos
         (progress, progressSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
@@ -95,6 +99,7 @@ public final class DiskScanner: Sendable {
         var stopped = false
         let lister = self.lister
         let protected = self.protected
+        let qos = self.qos
 
         await withTaskGroup(of: DirectoryListing.self) { group in
             func launch() {
@@ -108,7 +113,7 @@ public final class DiskScanner: Sendable {
                         }
                         // A folder that hangs, or finds no thread in time, reads as timed out: marked stale, and
                         // the walk goes on without it.
-                        guard case .listed(let listing) = await lister.list(path: path, folder: folder) else {
+                        guard case .listed(let listing) = await lister.list(path: path, folder: folder, qos: qos) else {
                             return DirectoryListing(folder: folder, outcome: .timedOut, entries: [])
                         }
                         return listing

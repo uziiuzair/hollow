@@ -199,11 +199,13 @@ private func record(_ live: LiveIndex, _ path: String) async -> FolderRecord {
 @Test func aReadThatStallsAfterOpenTimesOut() async throws {
     let hang = Hang()
     hang.blockReading(under: "/mount/")
-    let folders = lister(hang, idleTimeout: .milliseconds(300))
+    // The open deadline is far off (30 s), so a timeout well inside it can only be the 300 ms read deadline; the bound
+    // leaves a loaded machine room (fix round 1: 2.2 s against the old 2 s bound).
+    let folders = lister(hang, timeout: .seconds(30), idleTimeout: .milliseconds(300))
     defer { hang.release() }
     let started = ContinuousClock.now
     if case .timedOut = await folders.list(path: "/mount/dead", folder: 0) {} else { Issue.record("not timed out") }
-    #expect(ContinuousClock.now - started < .seconds(2))
+    #expect(ContinuousClock.now - started < .seconds(10))
     // Skipped like a hung open(), along with what lies under it.
     if case .skipped = await folders.list(path: "/mount/dead/sub", folder: 0) {} else { Issue.record("not skipped") }
 }
@@ -706,18 +708,40 @@ private func drip(_ seconds: Double) -> @Sendable (String, FolderID, @escaping @
     try await live.close()
 }
 
-// Task 10d: listing is background work. Its threads run below the watcher's callback queue (userInitiated), so a busy
-// listing pool can't delay the callback until fseventsd drops events (which costs a full rescan), nor compete with the UI.
-@Test func listingThreadsRunAtUtility() async throws {
-    let seen = OSAllocatedUnfairLock<qos_class_t?>(initialState: nil)
-    let folders = DirectoryLister(read: { _, folder, opened in
+// Fix round 1 (M2): each request runs at its own QoS on the shared pool. The first scan and user-initiated work list at
+// userInitiated; the live index's applies at utility, below the watcher's callback queue (userInitiated), so a busy pool
+// can't delay the callback until fseventsd drops events.
+@Test func eachListingRunsAtItsRequestsQoS() async throws {
+    let seen = OSAllocatedUnfairLock<[qos_class_t]>(initialState: [])
+    let folders = DirectoryLister(threads: 1, read: { _, folder, opened in
         opened()
-        seen.withLock { $0 = qos_class_self() }
+        seen.withLock { $0.append(qos_class_self()) }
         return DirectoryListing(folder: folder, outcome: .ok, entries: [])
     })
-    guard case .listed = await folders.list(path: "/anything", folder: 0) else {
-        Issue.record("not listed")
-        return
+    for qos in [QOS_CLASS_UTILITY, QOS_CLASS_USER_INITIATED, QOS_CLASS_UTILITY] {
+        guard case .listed = await folders.list(path: "/anything", folder: 0, qos: qos) else {
+            Issue.record("not listed")
+            return
+        }
     }
-    #expect(seen.withLock { $0 } == QOS_CLASS_UTILITY)
+    #expect(seen.withLock { $0 } == [QOS_CLASS_UTILITY, QOS_CLASS_USER_INITIATED, QOS_CLASS_UTILITY])
+}
+
+@Test func theFirstScanListsAtUserInitiatedAndAppliesAtUtility() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 10, "b/g.bin": 10])
+    let real = Fixtures.realPath(root)
+    let seen = OSAllocatedUnfairLock<[String: qos_class_t]>(initialState: [:])
+    let folders = DirectoryLister(read: { path, folder, opened in
+        seen.withLock { $0[path] = qos_class_self() }
+        return DirectoryLister.read(path, folder, opened)
+    })
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir())
+    await live.injectLister(folders)
+    await live.disableWatcher()
+    _ = try await live.open()
+    #expect(seen.withLock { $0[real + "/a"] } == QOS_CLASS_USER_INITIATED)
+    let base = await live.withIndex { $0.lastEventID } + 1_000_000_000
+    await live.enqueue([FSChange(path: real + "/a", id: base + 1, rescanSubtree: false, historyLost: false)])
+    #expect(seen.withLock { $0[real + "/a"] } == QOS_CLASS_UTILITY)
+    try await live.close()
 }

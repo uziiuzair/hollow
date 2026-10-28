@@ -98,6 +98,8 @@ public final class DirectoryLister: @unchecked Sendable {
         var deadline: DispatchTime
         /// When a queued request is skipped however busy the pool is.
         var giveUp: DispatchTime
+        /// The QoS the thread takes on while it serves this request.
+        var qos: qos_class_t
         var continuation: CheckedContinuation<Outcome, Never>
     }
 
@@ -172,7 +174,9 @@ public final class DirectoryLister: @unchecked Sendable {
         return path.split(separator: "/").dropFirst(2).first == "Library" ? "home Library" : "home folder"
     }
 
-    public func list(path: String, folder: FolderID) async -> Outcome {
+    /// Lists `path` on a pool thread running at `qos` for the length of this request: userInitiated (the default) for a
+    /// scan someone waits for, utility for a live index's background applies.
+    public func list(path: String, folder: FolderID, qos: qos_class_t = QOS_CLASS_USER_INITIATED) async -> Outcome {
         await withCheckedContinuation { continuation in
             let admitted = condition.withLock { () -> Bool in
                 let current = now()
@@ -187,14 +191,14 @@ public final class DirectoryLister: @unchecked Sendable {
                 let made = DispatchTime.now()
                 requests[nextTicket] = Request(path: path, folder: folder, phase: .queued,
                                                deadline: made + Self.interval(min(startTimeout, queueLimit)),
-                                               giveUp: made + Self.interval(queueLimit), continuation: continuation)
+                                               giveUp: made + Self.interval(queueLimit), qos: qos,
+                                               continuation: continuation)
                 queue.append(nextTicket)
                 if queue.count > idle, running < threads {
                     running += 1
                     let thread = Thread { self.serve() }
                     thread.name = "DirectoryLister"
-                    // Below EventWatcher's callback queue: a busy pool must not delay the callback until fseventsd
-                    // drops events (a full rescan), nor compete with the UI.
+                    // Each request sets its own QoS (serve()); utility until the first one does.
                     thread.qualityOfService = .utility
                     thread.start()
                 }
@@ -235,6 +239,9 @@ public final class DirectoryLister: @unchecked Sendable {
             armWatchdog()
             condition.unlock()
 
+            // A live index's applies run at utility, below EventWatcher's callback queue: a busy pool must not delay the
+            // callback until fseventsd drops events (a full rescan), nor compete with the UI.
+            pthread_set_qos_class_self_np(request.qos, 0)
             let listing = read(request.path, request.folder) { self.progress(ticket) }
             finished(ticket, path: request.path, listing)
         }
