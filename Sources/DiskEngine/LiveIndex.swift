@@ -163,6 +163,7 @@ public actor LiveIndex {
         await lock()
         defer { unlock() }
         closed = true
+        try? recordHistoryLocked(now: .now)
         watcher?.stop()
         watchTask?.cancel()
         saveTask?.cancel()
@@ -172,12 +173,40 @@ public actor LiveIndex {
         try saveNow()
     }
 
+    /// Records today's size snapshot and prunes old history (spec 6.4: once a day and at
+    /// app quit).
+    public func recordHistory(now: Date = .now) async throws {
+        await lock()
+        defer { unlock() }
+        try recordHistoryLocked(now: now)
+    }
+
+    /// What changed over the last `days` days: live sizes against the stored snapshot
+    /// from that day.
+    public func changes(since days: Int, now: Date = .now) async throws -> [Change] {
+        await lock()
+        defer { unlock() }
+        guard let index else { return [] }
+        let today = Day(now, calendar: .current)
+        let then = try history.snapshot(onOrBefore: today.adding(days: -days, calendar: .current))
+        return ChangeReport.changes(from: then ?? SizeSnapshot(sizes: [:]), to: try SizeSnapshot.capture(index))
+    }
+
     public func withIndex<R: Sendable>(_ body: (ScanIndex) throws -> R) rethrows -> R {
         guard let index else { preconditionFailure("LiveIndex used before open()") }
         return try body(index)
     }
 
     // MARK: - Private
+
+    private var history: HistoryStore { HistoryStore(directory: store.appending(path: "history")) }
+
+    private func recordHistoryLocked(now: Date) throws {
+        guard let index else { return }
+        let today = Day(now, calendar: .current)
+        try history.record(try SizeSnapshot.capture(index), on: today)
+        try history.prune(today: today)
+    }
 
     private func fullScan(device: dev_t, journal: String?) async throws -> ScanIndex {
         // The old snapshot refers to file tables about to be truncated; drop it first.
