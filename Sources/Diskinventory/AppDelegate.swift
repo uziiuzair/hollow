@@ -63,6 +63,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activitySinks: [String: (controller: DriveController, sink: AnyCancellable)] = [:]
     /// Drives whose eject was refused and whose spent controller was replaced: the map window may reattach to them.
     private var refusedEjects: Set<String> = []
+    /// Whether each external volume is a disk image, by uuid, as `DiskImageProbe` answered off main. A volume is shown
+    /// once it has an answer.
+    private var diskImages: [String: Bool] = [:]
+    private var probingDiskImages: Set<String> = []
+    /// Disk images get their index here, in the temporary folder, deleted when they unmount (never Application Support).
+    private let imageStoreBase = FileManager.default.temporaryDirectory.appending(path: AppIdentity.bundleID + ".images")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -82,6 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             storeBase = try AppIdentity.storeBase()
             registry = DriveRegistry(file: storeBase.appending(path: "drives.json"))
+            // Disk-image indexes left by a crash: the images are probed and scanned afresh when they mount.
+            try? FileManager.default.removeItem(at: imageStoreBase)
             syncVolumes()
         } catch {
             NSLog("Diskinventory: cannot open store: \(error)")
@@ -234,8 +242,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func syncVolumes() {
         guard registry != nil else { return }
         let now = Date()
-        let volumes = VolumeCatalog.current().map { v in
-            guard v.isInternalData, v.name.hasSuffix(" - Data") else { return v }
+        let volumes = VolumeCatalog.current().compactMap { v -> VolumeInfo? in
+            guard v.isInternalData else {
+                guard let image = diskImages[v.uuid] else {
+                    probeDiskImage(v)
+                    return nil
+                }
+                return v.markingDiskImage(image)
+            }
+            guard v.name.hasSuffix(" - Data") else { return v }
             return VolumeInfo(url: v.url, uuid: v.uuid, name: String(v.name.dropLast(7)),
                               isInternalData: true, device: v.device)
         }
@@ -250,7 +265,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         for v in volumes {
             var connected = false
-            if controllers[v.uuid] == nil, let store = try? LiveIndex.storeDirectory(base: storeBase, volume: v.url) {
+            if controllers[v.uuid] == nil,
+               let store = try? LiveIndex.storeDirectory(base: v.isDiskImage ? imageStoreBase : storeBase, volume: v.url) {
                 controllers[v.uuid] = DriveController(volume: v, store: store, exclusions: exclusions(for: v),
                                                 fullDiskAccess: { FullDiskAccess.status() != .denied })
                 connectedSince[v.uuid] = now
@@ -284,6 +300,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      unmounting: unmounts[window.uuid] != nil, refused: refusedEjects) {
             refusedEjects.remove(window.uuid)
             Task { await window.reattach(controller: c) }
+        }
+    }
+
+    /// Asks DiskArbitration, off main, whether a new volume is a disk image, then syncs again to show it.
+    private func probeDiskImage(_ v: VolumeInfo) {
+        guard probingDiskImages.insert(v.uuid).inserted else { return }
+        let url = v.url
+        Task { [weak self] in
+            let image = await Task.detached(priority: .utility) { DiskImageProbe.isDiskImage(volume: url) }.value
+            guard let self else { return }
+            self.probingDiskImages.remove(v.uuid)
+            self.diskImages[v.uuid] = image
+            self.syncVolumes()
         }
     }
 
@@ -390,6 +419,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             for uuid in gone {
                 await self.beginUnmount(uuid)?.value
+                if self.controllers[uuid]?.volume.isDiskImage == true {
+                    // Shown only while mounted: no "Not connected" tab and no index left behind.
+                    self.registry.dropUnmountedImage(uuid: uuid)
+                    try? FileManager.default.removeItem(at: LiveIndex.storeDirectory(base: self.imageStoreBase, uuid: uuid))
+                }
+                self.diskImages[uuid] = nil
                 self.controllers[uuid] = nil
                 self.unmounts[uuid] = nil
                 self.unmountFinished[uuid] = nil

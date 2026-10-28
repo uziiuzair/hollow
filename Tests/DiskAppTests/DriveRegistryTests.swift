@@ -65,3 +65,24 @@ import Foundation
     try Data(#"[{"uuid":"I","name":"Macintosh HD","tintIndex":0,"lastSeen":"2026-10-01T00:00:00Z"},{"uuid":"T7","name":"T7","tintIndex":1,"lastSeen":"2026-10-01T00:00:00Z"}]"#.utf8).write(to: file)
     #expect(DriveRegistry(file: file).all().map(\.isInternal) == [true, false])
 }
+
+// Final review M3: a mounted disk image is shown while it is mounted but never written to drives.json, so ejected images
+// don't pile up as "Not connected" tabs.
+@Test func diskImagesAreShownButNeverPersisted() throws {
+    let file = try Fixtures.tempDir().appending(path: "drives.json")
+    let reg = DriveRegistry(file: file)
+    let image = VolumeInfo(url: URL(filePath: "/Volumes/DITrash"), uuid: "IMG", name: "DITrash", isInternalData: false,
+                           device: 20, isDiskImage: true)
+    let t7 = VolumeInfo(url: URL(filePath: "/Volumes/T7"), uuid: "T7", name: "T7", isInternalData: false, device: 21)
+    _ = try reg.upsert(image, space: nil, now: .now)
+    #expect(reg.all().map(\.uuid) == ["IMG"])
+    #expect(!FileManager.default.fileExists(atPath: file.path))
+    #expect(!reg.needsWrite(for: image))
+    _ = try reg.upsert(t7, space: nil, now: .now)
+    #expect(Set(reg.all().map(\.uuid)) == ["IMG", "T7"])
+    #expect(DriveRegistry(file: file).all().map(\.uuid) == ["T7"])
+    reg.dropUnmountedImage(uuid: "IMG")
+    #expect(reg.all().map(\.uuid) == ["T7"])
+    reg.dropUnmountedImage(uuid: "T7")
+    #expect(reg.all().map(\.uuid) == ["T7"])
+}

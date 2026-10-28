@@ -44,6 +44,8 @@ public final class DriveRegistry: @unchecked Sendable {
     private let file: URL
     private let lock = NSLock()
     private var drives: [KnownDrive]
+    /// Mounted disk images: listed while mounted, never written to the file.
+    private var images: Set<String> = []
 
     public init(file: URL) {
         self.file = file
@@ -65,8 +67,10 @@ public final class DriveRegistry: @unchecked Sendable {
         return []
     }
 
+    /// Adds or updates a drive. A disk image is kept in memory only, until `dropUnmountedImage`.
     public func upsert(_ v: VolumeInfo, space: VolumeSpace?, now: Date) throws -> KnownDrive {
         lock.lock(); defer { lock.unlock() }
+        if v.isDiskImage { images.insert(v.uuid) }
         var next = drives
         let drive: KnownDrive
         if let i = next.firstIndex(where: { $0.uuid == v.uuid }) {
@@ -119,6 +123,13 @@ public final class DriveRegistry: @unchecked Sendable {
         return drives
     }
 
+    /// Forgets a disk image once it has unmounted (it was never written). Does nothing for a drive.
+    public func dropUnmountedImage(uuid: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard images.remove(uuid) != nil else { return }
+        drives.removeAll { $0.uuid == uuid }
+    }
+
     public func forget(uuid: String) throws {
         lock.lock(); defer { lock.unlock() }
         let next = drives.filter { $0.uuid != uuid }
@@ -133,6 +144,8 @@ public final class DriveRegistry: @unchecked Sendable {
     }
 
     private func write(_ list: [KnownDrive]) throws {
+        let list = list.filter { !images.contains($0.uuid) }
+        if list.isEmpty, !FileManager.default.fileExists(atPath: file.path(percentEncoded: false)) { return }
         try FileManager.default.createDirectory(
             at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         let enc = JSONEncoder()
