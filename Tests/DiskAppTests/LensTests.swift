@@ -99,3 +99,17 @@ import DiskEngine
     let ok = try LensRules(json: Data(#"{"version": 1, "rules": [{"id": "x", "name": "X", "pattern": "a/b", "safety": "app-managed", "explanation": "E.", "instruction": "Do it."}]}"#.utf8))
     #expect(ok.rule(id: "x")?.hoverText == "E. Do it.")
 }
+
+// Fix round 1: node_modules that belong to editors and tools are not project dependencies.
+@Test func toolNodeModulesAreNotHits() async throws {
+    let idx = try await Fixtures.index([
+        "Users/u/.vscode/extensions/x/node_modules/a.bin": 2_000_000,
+        "Users/u/.claude/plugins/p/node_modules/b.bin": 2_000_000,
+        "Users/u/Library/Application Support/Code/node_modules/c.bin": 2_000_000,
+        "Users/u/code/app/node_modules/d.bin": 2_000_000,
+    ])
+    let r = LensMatcher.report(index: idx, rules: .bundled)
+    #expect(r.hits.map(\.path) == ["Users/u/code/app/node_modules"])
+    #expect(LensRules.bundled.rule(covering: "Users/u/.vscode/extensions/x/node_modules") == nil)
+    #expect(LensRules.bundled.rule(id: "davinci-cache")?.safety == .review)
+}
