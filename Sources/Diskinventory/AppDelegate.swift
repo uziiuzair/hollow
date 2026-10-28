@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var internalUUID: String?
     private var selected = ""
     private var observing: AnyCancellable?
+    private weak var observedController: DriveController?
 
     private var state = DropdownState(model: DropdownModel.make(
         drives: [], selected: "", connected: [], summary: nil, space: nil, activity: .idle,
@@ -170,11 +171,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func ejectSelected() {
         let uuid = selected
-        guard let c = controllers[uuid], !c.volume.isInternalData else { return }
+        guard let c = controllers[uuid], !c.volume.isInternalData, unmounts[uuid] == nil else { return }
         let url = c.volume.url
         let name = c.volume.name
+        // Registered synchronously so a second click cannot start another eject.
+        let unmount = beginUnmount(uuid)
         Task { [weak self] in
-            await self?.beginUnmount(uuid)?.value
+            await unmount?.value
             do {
                 try await Task.detached { try NSWorkspace.shared.unmountAndEjectDevice(at: url) }.value
             } catch {
@@ -198,7 +201,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func observeSelected() {
-        observing = liveController?.objectWillChange.sink { [weak self] _ in
+        let c = liveController
+        observedController = c
+        observing = c?.objectWillChange.sink { [weak self] _ in
             Task { @MainActor in self?.rebuild() }
         }
     }
@@ -215,7 +220,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.model != model { state.model = model }
         let period = c?.period ?? 7
         if state.period != period { state.period = period }
-        if observing == nil { observeSelected() }
+        // A new controller for the same UUID (remount, failed eject) needs a fresh subscription.
+        if observedController !== c { observeSelected() }
     }
 
     private func selectDrive(_ uuid: String) {
