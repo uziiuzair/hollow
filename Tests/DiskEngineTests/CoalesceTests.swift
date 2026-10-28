@@ -165,6 +165,19 @@ private func change(_ path: String, _ id: UInt64, subtree: Bool = false) -> FSCh
     #expect(out.merged(with: IndexChange(generation: 4, folders: nil)) == IndexChange(generation: 4, folders: nil))
 }
 
+// Fix round 2: a change naming more paths than the cap is "anything may have changed", so merging stays bounded.
+@Test func tooManyPathsCollapseToAnything() {
+    let cap = IndexChange.maxPaths
+    let wide = IndexChange(generation: 2, folders: ["a": 1], renamed: Set((0...cap).map { "a/\($0)" }))
+    #expect(wide.folders == nil && wide.renamed.isEmpty && wide.moved.isEmpty)
+    let atCap = IndexChange(generation: 2, folders: ["a": 1], renamed: Set((1...cap).map { "a/\($0)" }))
+    #expect(atCap.folders == ["a": 1] && atCap.renamed.count == cap)
+    var merged = IndexChange(generation: 1, folders: ["f0": 1])
+    for i in 1...cap { merged = merged.merged(with: IndexChange(generation: i + 1, folders: ["f\(i)": 1])) }
+    #expect(merged.folders == nil && merged.generation == cap + 1)
+    #expect(merged.merged(with: IndexChange(generation: 999, folders: ["g": 1])).folders == nil)
+}
+
 @Test func missingMountPointFailsOpen() async throws {
     let live = LiveIndex(volumeRoot: try Fixtures.tree(["a/f.bin": 10]), store: try Fixtures.tempDir())
     await live.injectMountPointLookup { _ in throw DiskEngineError.posix("statfs", EIO) }

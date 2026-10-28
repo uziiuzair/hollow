@@ -110,14 +110,23 @@ public final class ScanIndex {
     /// Re-reads one already-listed folder's direct contents. Subfolders that are still
     /// there keep their IDs and subtrees; new ones are returned for scanning; gone ones
     /// become garbage. Totals of this folder and every ancestor are corrected.
-    public func relist(_ listing: DirectoryListing) throws -> [FolderID] {
+    /// What a relist found: the new subfolders still to scan, and whether the folder's blocks (subfolders and stored
+    /// files) changed by name.
+    public struct RelistResult: Sendable {
+        public var newFolders: [FolderID]
+        public var namesChanged: Bool
+    }
+
+    public func relist(_ listing: DirectoryListing) throws -> RelistResult {
         let folder = listing.folder
         let id = Int(folder)
         let old = folders[id]
 
         var oldDirect = old.smallAllocated
+        var oldBigNames: [String] = []
         for file in old.firstFile..<(old.firstFile + old.bigFileCount) {
             oldDirect += try files.record(file).allocated
+            oldBigNames.append(try files.name(file))
         }
         var oldChildren: [String: FolderID] = [:]
         var child = old.firstChildFolder
@@ -141,6 +150,7 @@ public final class ScanIndex {
         var children: [FolderID] = []
         var newFolders: [FolderID] = []
         var newDirect: UInt64 = 0
+        var newBigNames: [String] = []
         var pass: Set<UInt64> = []
         let skipped = excludedNames(in: folder)
         for entry in listing.outcome == .ok ? listing.entries : [] {
@@ -158,9 +168,15 @@ public final class ScanIndex {
                 newFolders.append(new)
                 continue
             }
+            let stored = folders[id].bigFileCount
             newDirect += try addFile(entry, to: folder, pass: &pass)
+            if folders[id].bigFileCount != stored { newBigNames.append(entry.name) }
         }
         link(children, under: folder)
+        // Kept subfolders were removed from oldChildren, so any left there are gone. Stored files usually list in the
+        // same order; only when they don't are they compared as sets.
+        let namesChanged = !oldChildren.isEmpty || !newFolders.isEmpty
+            || (newBigNames != oldBigNames && Set(newBigNames) != Set(oldBigNames))
 
         var removedTotal: UInt64 = 0
         for gone in oldChildren.values {
@@ -169,7 +185,7 @@ public final class ScanIndex {
         }
         let delta = Int64(bitPattern: newDirect) - Int64(bitPattern: oldDirect) - Int64(bitPattern: removedTotal)
         addToTotals(from: folder, delta)
-        return newFolders
+        return RelistResult(newFolders: newFolders, namesChanged: namesChanged)
     }
 
     /// Empties a folder so `integrate` can list it from scratch: its total leaves its
@@ -303,19 +319,6 @@ public final class ScanIndex {
             cursor = folders[Int(cursor)].parent
         }
         return parts.reversed().reduce(rootPath) { $0 + "/" + $1 }
-    }
-
-    /// The names of the folder's blocks: its subfolders and stored files. Small files are one block whatever their names.
-    public func blockNames(of folder: FolderID) throws -> Set<String> {
-        let record = folders[Int(folder)]
-        var names: Set<String> = []
-        var child = record.firstChildFolder
-        while child != noFolder {
-            names.insert(folderName(child))
-            child = folders[Int(child)].nextSibling
-        }
-        for file in record.firstFile..<(record.firstFile + record.bigFileCount) { names.insert(try files.name(file)) }
-        return names
     }
 
     /// Subfolders, stored files, and one small-files bucket, largest first.

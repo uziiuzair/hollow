@@ -177,6 +177,7 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
 @MainActor @Test func buildMapAndGenerationWhileHeld() async throws {
     let root = try Fixtures.tree(["a/f.bin": 2_000_000])
     let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    c.beginObservingChanges()
     await c.hold()
     let s = try #require(await c.buildMap(MapRequest(path: "", size: CGSize(width: 400, height: 300), period: 7)))
     #expect(s.total > 0 && s.layout.topLevelCount >= 1)
@@ -193,11 +194,26 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
 // Two updates before the map reads them: neither is lost (C16).
 @MainActor @Test func changesMergeUntilTaken() async throws {
     let c = DriveController(volume: try Fixtures.volume(try Fixtures.tree(["a/f.bin": 10])), store: try Fixtures.tempDir())
+    c.beginObservingChanges()
     c.receive(IndexChange(generation: 1, folders: ["a/x": 5]))
     c.receive(IndexChange(generation: 2, folders: ["b": 7]))
     #expect(c.generation == 2 && c.lastChange == IndexChange(generation: 2, folders: ["b": 7]))
     #expect(c.takeChange() == IndexChange(generation: 2, folders: ["a/x": 5, "b": 7]))
     #expect(c.takeChange() == nil)
+}
+
+// Fix round 2: with no window watching, updates don't pile up; one starting to watch begins from nothing.
+@MainActor @Test func changesAreNotKeptWithoutAnObserver() async throws {
+    let c = DriveController(volume: try Fixtures.volume(try Fixtures.tree(["a/f.bin": 10])), store: try Fixtures.tempDir())
+    c.receive(IndexChange(generation: 1, folders: ["a": 5]))
+    #expect(c.generation == 1 && c.takeChange() == nil)
+    c.beginObservingChanges()
+    c.receive(IndexChange(generation: 2, folders: ["b": 7]))
+    c.endObservingChanges()
+    #expect(c.takeChange() == nil)
+    c.beginObservingChanges()
+    c.receive(IndexChange(generation: 3, folders: ["c": 1]))
+    #expect(c.takeChange() == IndexChange(generation: 3, folders: ["c": 1]))
 }
 
 // Ejecting with the map open: the window's model ends offline with no map, and lets go of the drive.

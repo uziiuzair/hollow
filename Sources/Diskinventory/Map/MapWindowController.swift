@@ -110,6 +110,7 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     func reattach(controller: DriveController) async {
         guard let model, let ui, model.isDisconnected, driveController !== controller else { return }
         // Set at once, so a second sync before the map is back does not reattach again.
+        driveController?.endObservingChanges()
         driveController = controller
         controllerSubscriptions.removeAll()
         observeController(controller, model: model, ui: ui)
@@ -140,6 +141,7 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     private func observeController(_ controller: DriveController, model: MapModel, ui: MapWindowState) {
         // The opening build (or a reattach's) covers whatever the controller changed before this window watched it.
         _ = controller.takeChange()
+        controller.beginObservingChanges()
         // C5: @Published fires on willSet; hop a turn so the model reads the new values.
         // C16: each update merges into the controller's pending change, so an update whose hop finds it already taken
         // was handed over by an earlier hop and needs nothing more.
@@ -577,6 +579,7 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
         displayObserver = nil
         subscriptions.removeAll()
         controllerSubscriptions.removeAll()
+        driveController?.endObservingChanges()
         model?.close()
         window?.contentView = nil
         model = nil

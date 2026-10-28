@@ -23,12 +23,20 @@ public struct IndexChange: Equatable, Sendable {
     /// renamed, whatever their sizes. Empty when `folders` is nil.
     public var renamed: Set<String>
 
+    /// More paths than this in `folders` or `renamed` and the change says "anything may have changed" (nil folders),
+    /// so a change merged for a long time stays small.
+    public static let maxPaths = 256
+
     /// `moved` defaults to the magnitude of each net delta in `folders`.
     public init(generation: Int, folders: [String: Int64]?, moved: [String: UInt64]? = nil, renamed: Set<String> = []) {
         self.generation = generation
+        guard let folders, folders.count <= Self.maxPaths, renamed.count <= Self.maxPaths else {
+            self.folders = nil; self.moved = [:]; self.renamed = []
+            return
+        }
         self.folders = folders
-        self.moved = folders == nil ? [:] : moved ?? folders!.mapValues(\.magnitude)
-        self.renamed = folders == nil ? [] : renamed
+        self.moved = moved ?? folders.mapValues(\.magnitude)
+        self.renamed = renamed
     }
 
     /// Both changes as one (C16): nil folders win; otherwise each outermost path carries every delta at or below it,
@@ -192,7 +200,7 @@ public actor LiveIndex {
         var toScan: [FolderID] = []
         for parent in parents.sorted() {
             guard let folder = index.folder(atRelativePath: parent), !index.folders[Int(folder)].flags.contains(.garbage) else { continue }
-            toScan += try index.relist(reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder))
+            toScan += try index.relist(reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder)).newFolders
         }
         try fault?()
         if !toScan.isEmpty { try await scan(index, starting: toScan) }
@@ -237,7 +245,7 @@ public actor LiveIndex {
             let folder = FolderID(id)
             let listing = reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder)
             if listing.outcome == .ok { readable += 1 }
-            toScan += try index.relist(listing)
+            toScan += try index.relist(listing).newFolders
         }
         if !toScan.isEmpty {
             beforeScan?()
@@ -473,10 +481,10 @@ public actor LiveIndex {
             var paths: [String: FolderID] = [:]
             for folder in relists.union(subtrees) { paths[index.relativePath(of: folder)] = folder }
             let outer = paths.filter { path, _ in IndexChange.outermostAncestor(of: path) { paths[$0] != nil } == path }
-            // Every touched folder's total and block names before, to report what moved, not only the net.
+            // Every touched folder's total before, to report what moved, not only the net.
             let before = paths.mapValues { index.folders[Int($0)].totalAllocated }
-            var namesBefore: [String: Set<String>] = [:]
-            for (path, folder) in paths where !subtrees.contains(folder) { namesBefore[path] = try index.blockNames(of: folder) }
+            // A subtree rescan doesn't know what changed by name inside it: count it as renamed.
+            var renamed = Set(subtrees.map { index.relativePath(of: $0) })
 
             var toScan: [FolderID] = []
             // Shallow first, so a reset ancestor turns its descendants into garbage first.
@@ -490,22 +498,19 @@ public actor LiveIndex {
             for folder in relists where !index.folders[Int(folder)].flags.contains(.garbage) && !toScan.contains(folder) {
                 let listing = reader.list(path: index.path(of: folder, rootPath: index.rootPath), folder: folder)
                 relistCount += 1
-                toScan += try index.relist(listing)
+                let result = try index.relist(listing)
+                toScan += result.newFolders
+                if result.namesChanged { renamed.insert(index.relativePath(of: folder)) }
             }
             try fault?()
             if !toScan.isEmpty { try await scan(index, starting: toScan) }
-            // Found again by path: a folder a relist removed is gone (0), and one a subtree rescan rebuilt is the new one.
+            // A garbage folder is found again by path: one a relist removed is gone (0), and one a subtree rescan
+            // rebuilt is the new one.
             var delta: [String: Int64] = [:]
-            var renamed: Set<String> = []
-            for path in paths.keys {
-                let now = index.folder(atRelativePath: path)
+            for (path, folder) in paths {
+                let now = index.folders[Int(folder)].flags.contains(.garbage) ? index.folder(atRelativePath: path) : folder
                 let after = now.map { index.folders[Int($0)].totalAllocated } ?? 0
                 delta[path] = Int64(bitPattern: after &- before[path]!)
-                if let old = namesBefore[path] {
-                    if try now.map({ try index.blockNames(of: $0) }) != old { renamed.insert(path) }
-                } else {
-                    renamed.insert(path)   // a subtree rescan: what changed by name inside it isn't known
-                }
             }
             // A folder's own change is its net minus that of the touched folders nearest below it.
             var own = delta

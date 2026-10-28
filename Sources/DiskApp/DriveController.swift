@@ -18,8 +18,10 @@ public final class DriveController: ObservableObject {
     @Published public private(set) var generation = 0
     /// What the open index's last update changed; set just before `generation` rises.
     @Published public private(set) var lastChange: IndexChange?
-    /// Every update since the last `takeChange()`, merged, so a reader that falls behind loses none (C16).
+    /// Every update since the last `takeChange()`, merged, so a reader that falls behind loses none (C16). Kept only
+    /// while something observes changes: a new observer builds its map anyway, so nothing older is owed to it.
     private var pendingChange: IndexChange?
+    private var changeObservers = 0
     /// The cleanup lens over the open index. Kept across a cool, so the dropdown still has it.
     @Published public private(set) var lens: LensReport?
     /// Every app-managed hit of the last lens walk, of any size and uncapped: the `protected` set for the review sheet and
@@ -210,9 +212,20 @@ public final class DriveController: ObservableObject {
 
     /// One update of the open index.
     func receive(_ change: IndexChange) {
-        pendingChange = pendingChange.map { $0.merged(with: change) } ?? change
+        if changeObservers > 0 { pendingChange = pendingChange.map { $0.merged(with: change) } ?? change }
         lastChange = change
         generation += 1
+    }
+
+    /// A map window starts reading `takeChange()`. Pair with `endObservingChanges()`.
+    public func beginObservingChanges() {
+        changeObservers += 1
+    }
+
+    /// The last observer gone: what is pending is dropped and nothing more is kept.
+    public func endObservingChanges() {
+        changeObservers = max(changeObservers - 1, 0)
+        if changeObservers == 0 { pendingChange = nil }
     }
 
     /// Everything the index changed since the last call, merged into one change, or nil when nothing did. Clears it.
