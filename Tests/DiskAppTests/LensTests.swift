@@ -181,8 +181,7 @@ import DiskEngine
 }
 
 @Test func aCancelledWalkReturnsEarly() async throws {
-    var spec: [String: Int] = [:]
-    for i in 0..<300 { spec["Users/u/many/f\(i)/x.bin"] = 10 }
+    let spec = Dictionary(uniqueKeysWithValues: (0..<300).map { ("Users/u/many/f\($0)/x.bin", 10) })
     let visited = try await Task {
         // Built first: a cancelled scan would stop too.
         let idx = try await Fixtures.index(spec)
