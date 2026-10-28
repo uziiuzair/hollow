@@ -46,22 +46,58 @@ public struct BasketItem: Equatable, Sendable, Identifiable {
     /// True when `other` is this item or is inside it.
     func covers(_ other: String) -> Bool { other == path || other.hasPrefix(path + "/") }
 
-    /// The app-managed hit this item is, or is inside.
-    func managingHit(in protected: [LensHit]) -> LensHit? {
-        protected.first { $0.safety == .appManaged && BasketItem.covers($0.path, path) }
+    /// Each proper ancestor of a relative path, shallowest first: "a", "a/b" for "a/b/c".
+    static func ancestors(of path: String) -> [String] {
+        var out: [String] = []
+        var index = path.startIndex
+        while let slash = path[index...].firstIndex(of: "/") {
+            out.append(String(path[..<slash]))
+            index = path.index(after: slash)
+        }
+        return out
+    }
+}
+
+/// A drive's app-managed hits, indexed by path, so the review sheet and `Trasher` ask about each item in its depth, not
+/// in the number of hits.
+struct ProtectedHits: Sendable {
+    /// Each app-managed hit by its path (the first one listed wins).
+    private var byPath: [String: LensHit] = [:]
+    /// Each proper ancestor of an app-managed hit, with the first hit under it.
+    private var byAncestor: [String: LensHit] = [:]
+
+    init(_ hits: [LensHit]) {
+        for hit in hits where hit.safety == .appManaged {
+            if byPath[hit.path] == nil { byPath[hit.path] = hit }
+            for ancestor in BasketItem.ancestors(of: hit.path) where byAncestor[ancestor] == nil { byAncestor[ancestor] = hit }
+        }
     }
 
-    /// An app-managed hit strictly inside this item.
-    func containedHit(in protected: [LensHit]) -> LensHit? {
-        protected.first { $0.safety == .appManaged && $0.path.hasPrefix(path + "/") }
+    /// The app-managed hit `path` is, or is inside.
+    func managing(_ path: String) -> LensHit? {
+        PathChecks.tick()
+        if let hit = byPath[path] { return hit }
+        for ancestor in BasketItem.ancestors(of: path) {
+            PathChecks.tick()
+            if let hit = byPath[ancestor] { return hit }
+        }
+        return nil
     }
 
-    private static func covers(_ folder: String, _ other: String) -> Bool { other == folder || other.hasPrefix(folder + "/") }
+    /// An app-managed hit strictly inside `path`.
+    func contained(in path: String) -> LensHit? {
+        PathChecks.tick()
+        return byAncestor[path]
+    }
 }
 
 /// The items picked on one drive, in the order they were added. A folder swallows anything inside it.
 @MainActor public final class Basket: ObservableObject {
     @Published public private(set) var items: [BasketItem] = []
+    /// The paths in `items`, and for each proper ancestor of one, the item paths under it: an add checks its own
+    /// ancestors (its depth) and finds what it swallows directly, so a prefill of n items costs n times the depth.
+    private var paths: Set<String> = []
+    private var under: [String: Set<String>] = [:]
 
     public init() {}
 
@@ -74,37 +110,64 @@ public struct BasketItem: Equatable, Sendable, Identifiable {
     /// Anything already here that is under the new item leaves.
     @discardableResult public func add(_ item: BasketItem) -> Bool {
         var next = items
-        guard Self.insert(item, into: &next) else { return false }
-        items = next
+        guard insert(item, into: &next) else { return false }
+        items = next.count == paths.count ? next : next.filter { paths.contains($0.path) }
         return true
     }
 
     /// True when `add(item)` would take it.
     public func accepts(_ item: BasketItem) -> Bool {
-        !BasketItem.isBucketOrRoot(item.path) && !items.contains { $0.covers(item.path) }
+        !BasketItem.isBucketOrRoot(item.path) && !isCovered(item.path)
     }
 
     public func add(contentsOf newItems: [BasketItem]) {
         var next = items
         var changed = false
-        for item in newItems where Self.insert(item, into: &next) { changed = true }
-        if changed { items = next }
+        for item in newItems where insert(item, into: &next) { changed = true }
+        // Swallowed items left `paths` as they went; one pass drops them from the list.
+        if changed { items = next.count == paths.count ? next : next.filter { paths.contains($0.path) } }
     }
 
-    public func remove(paths: Set<String>) {
-        guard items.contains(where: { paths.contains($0.path) }) else { return }
-        items.removeAll { paths.contains($0.path) }
+    public func remove(paths removed: Set<String>) {
+        guard items.contains(where: { removed.contains($0.path) }) else { return }
+        for path in removed where paths.contains(path) { forget(path) }
+        items.removeAll { removed.contains($0.path) }
     }
 
     public func clear() {
+        paths = []
+        under = [:]
         if !items.isEmpty { items = [] }
     }
 
-    private static func insert(_ item: BasketItem, into list: inout [BasketItem]) -> Bool {
-        guard !BasketItem.isBucketOrRoot(item.path), !list.contains(where: { $0.covers(item.path) }) else { return false }
-        list.removeAll { item.covers($0.path) }
+    /// The path is here, or is under an item here.
+    private func isCovered(_ path: String) -> Bool {
+        PathChecks.tick()
+        if paths.contains(path) { return true }
+        for ancestor in BasketItem.ancestors(of: path) {
+            PathChecks.tick()
+            if paths.contains(ancestor) { return true }
+        }
+        return false
+    }
+
+    /// Appends the item and drops what it swallows from the index (the caller drops them from the list).
+    private func insert(_ item: BasketItem, into list: inout [BasketItem]) -> Bool {
+        guard !BasketItem.isBucketOrRoot(item.path), !isCovered(item.path) else { return false }
+        for child in under[item.path] ?? [] { forget(child) }
+        paths.insert(item.path)
+        for ancestor in BasketItem.ancestors(of: item.path) { under[ancestor, default: []].insert(item.path) }
         list.append(item)
         return true
+    }
+
+    private func forget(_ path: String) {
+        PathChecks.tick()
+        paths.remove(path)
+        for ancestor in BasketItem.ancestors(of: path) {
+            under[ancestor]?.remove(path)
+            if under[ancestor]?.isEmpty == true { under[ancestor] = nil }
+        }
     }
 }
 

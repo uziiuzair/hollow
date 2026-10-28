@@ -63,8 +63,9 @@ public struct TrashOutcome: Equatable, Sendable {
 
     /// Every item that would have moved fails with `.driveGone`. Items `Trasher` would refuse are left out, as it leaves them out.
     public static func driveGone(_ items: [BasketItem], protected: [LensHit], rules: LensRules = .bundled) -> TrashOutcome {
-        TrashOutcome(moved: [], failures: items
-            .filter { TrashPath.isPlainRelative($0.path) && ReviewSheet.refusalKind(for: $0, protected: protected, rules: rules) == nil }
+        let index = ProtectedHits(protected)
+        return TrashOutcome(moved: [], failures: items
+            .filter { TrashPath.isPlainRelative($0.path) && ReviewSheet.refusalKind(for: $0, protected: index, rules: rules) == nil }
             .map { TrashFailureItem(path: $0.path, name: $0.name, reason: .driveGone) }, freed: 0)
     }
 }
@@ -130,10 +131,11 @@ public enum Trasher {
         // nil: moved. Paths absent from `results` were skipped silently.
         var results: [String: TrashFailure?] = [:]
 
+        let index = ProtectedHits(protected)
         var candidates: [BasketItem] = []
         for item in items where results[item.path] == nil && !candidates.contains(where: { $0.path == item.path }) {
             guard TrashPath.isPlainRelative(item.path) else { results[item.path] = .some(.outsideDrive); continue }
-            switch ReviewSheet.refusalKind(for: item, protected: protected, rules: rules) {
+            switch ReviewSheet.refusalKind(for: item, protected: index, rules: rules) {
             case .managed?: continue
             case .structural?: results[item.path] = .some(.failed(ReviewSheet.structuralReason))
             case .holds?: results[item.path] = .some(.failed(containsManaged))

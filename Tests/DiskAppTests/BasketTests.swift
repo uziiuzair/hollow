@@ -170,3 +170,43 @@ func level(_ nodes: [MapNode], sizes: [UInt64]) -> MapSnapshot {
     #expect(level([b, small], sizes: [12, 1]).basketItem(droppedKey: "Users/u#small") == nil)
     #expect(level([b, small], sizes: [12, 1]).basketItem(at: 1) == nil)
 }
+
+// Final review I4: prefilling the basket and building the review sheet grow with the item count, not its square. Counted
+// (path comparisons), not timed, so the test holds on any machine and under any load.
+private func manyHits(_ n: Int) -> [BasketItem] {
+    (0..<n).map { i in
+        item("Users/u/code/p\(i % 50)/w\(i)/node_modules", UInt64(1_000_000 + i), folder: true, safety: .regenerates)
+    }
+}
+
+@MainActor @Test func prefillingTwoThousandItemsIsSubQuadratic() {
+    let counter = PathCheckCounter()
+    let basket = Basket()
+    PathChecks.$counter.withValue(counter) {
+        basket.add(contentsOf: manyHits(2_000))
+        // A parent of 40 of them swallows them, and a child of an item already there is refused.
+        basket.add(contentsOf: [item("Users/u/code/p7", 1, folder: true), item("Users/u/code/p8/w8/node_modules/x", 1)])
+    }
+    #expect(basket.items.count == 2_000 - 40 + 1)
+    #expect(!basket.items.contains { $0.path.hasPrefix("Users/u/code/p7/") })
+    #expect(basket.items.last?.path == "Users/u/code/p7")
+    // Quadratic is about 2,000,000 here; linear in items times path depth is well under 100,000.
+    #expect(counter.count < 100_000, "\(counter.count) path checks")
+}
+
+@Test func reviewSheetForTwoThousandItemsIsSubQuadratic() {
+    let items = manyHits(2_000)
+    let protected = (0..<2_000).map { i in
+        LensHit(ruleID: "docker", path: "Users/u\(i)/Library/Containers/com.docker.docker", name: "com.docker.docker",
+                size: 1, isFolder: true, safety: .appManaged)
+    } + [LensHit(ruleID: "docker", path: "Users/u/code/p3/w3/node_modules/vm", name: "vm", size: 1, isFolder: true,
+                 safety: .appManaged)]
+    let counter = PathCheckCounter()
+    let sheet = PathChecks.$counter.withValue(counter) {
+        ReviewSheet.make(items: items, unchecked: [], protected: protected, driveName: "M", driveConnected: true)
+    }
+    #expect(sheet.rows.count == 2_000)
+    #expect(sheet.rows.filter { !$0.isCheckable }.map(\.path) == ["Users/u/code/p3/w3/node_modules"])
+    #expect(sheet.buttonTitle == "Move 1999 items to Trash")
+    #expect(counter.count < 200_000, "\(counter.count) path checks")
+}

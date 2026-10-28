@@ -17,6 +17,8 @@ struct ReviewSheetView: View {
 
 
     @State private var unchecked: Set<String> = []
+    /// The rows with their rule lookups and refusals, built once per presentation and per basket change, never per redraw.
+    @State private var list: ReviewList?
 
     static let width: CGFloat = 560
     static let maxRowsHeight: CGFloat = 420
@@ -31,6 +33,12 @@ struct ReviewSheetView: View {
         }
         .frame(width: Self.width)
         .interactiveDismissDisabled(isMoving)
+        .onAppear { rebuildList() }
+        .onChange(of: basket.items) { rebuildList() }
+    }
+
+    private func rebuildList() {
+        list = ReviewList(items: basket.items, protected: protected())
     }
 
     private var isMoving: Bool { phase == .moving }
@@ -38,9 +46,9 @@ struct ReviewSheetView: View {
     // MARK: Review
 
     private var review: some View {
-        let protectedHits = protected()
-        let sheet = ReviewSheet.make(items: basket.items, unchecked: unchecked, protected: protectedHits,
-                                     driveName: driveName, driveConnected: driveConnected)
+        // Only the first draw, before onAppear has built the list, builds one here.
+        let list = self.list ?? ReviewList(items: basket.items, protected: protected())
+        let sheet = list.sheet(unchecked: unchecked, driveName: driveName, driveConnected: driveConnected)
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(ReviewSheet.title).font(.system(size: 15, weight: .semibold))
@@ -60,18 +68,35 @@ struct ReviewSheetView: View {
         .disabled(isMoving)
     }
 
+    /// Up to this many rows the list hugs them; past it they are drawn lazily in a list of the full height.
+    static let huggedRows = 8
+
     /// As tall as the rows, up to `maxRowsHeight`; past that the rows scroll.
-    private func rows(_ rows: [ReviewRow]) -> some View {
-        let list = VStack(spacing: 0) {
-            ForEach(rows, id: \.path) { row in
-                rowView(row)
-                if row.path != rows.last?.path { Divider().padding(.leading, 48) }
+    @ViewBuilder private func rows(_ rows: [ReviewRow]) -> some View {
+        let last = rows.last?.path
+        if rows.count <= Self.huggedRows {
+            // Hugs the rows (the sheet would otherwise stretch it to the cap), and scrolls past the cap.
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(rows, id: \.path) { row in rowWithDivider(row, last: last) }
+                }
             }
-        }
-        // Hugs the rows (the sheet would otherwise stretch it to the cap), and scrolls past the cap.
-        return ScrollView { list }
             .frame(maxHeight: Self.maxRowsHeight)
             .fixedSize(horizontal: false, vertical: true)
+        } else {
+            // Many rows (up to 2,000 hits): only the visible ones are built.
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(rows, id: \.path) { row in rowWithDivider(row, last: last) }
+                }
+            }
+            .frame(height: Self.maxRowsHeight)
+        }
+    }
+
+    @ViewBuilder private func rowWithDivider(_ row: ReviewRow, last: String?) -> some View {
+        rowView(row)
+        if row.path != last { Divider().padding(.leading, 48) }
     }
 
     private func rowView(_ row: ReviewRow) -> some View {

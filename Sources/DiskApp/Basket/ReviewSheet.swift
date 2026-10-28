@@ -49,26 +49,15 @@ public struct ReviewSheet: Equatable, Sendable {
     /// `protected` is the drive's app-managed hits: an item that is one, is inside one or holds one gets no checkbox.
     public static func make(items: [BasketItem], unchecked: Set<String>, protected: [LensHit], rules: LensRules = .bundled,
                             driveName: String, driveConnected: Bool) -> ReviewSheet {
-        let rows = items.map { item -> ReviewRow in
-            let instruction = refusal(for: item, protected: protected, rules: rules)
-            let parent = item.path.split(separator: "/").dropLast().joined(separator: "/")
-            return ReviewRow(path: item.path, name: item.name, location: parent.isEmpty ? "Drive root" : parent,
-                             size: Format.gb(item.size), explanation: rule(for: item, rules: rules)?.explanation ?? notKnown,
-                             instruction: instruction, isChecked: instruction == nil && !unchecked.contains(item.path))
-        }
-        let selected = trashable(items, unchecked: unchecked, protected: protected, rules: rules)
-        let total = selected.reduce(0) { $0 + $1.size }
-        let n = selected.count
-        return ReviewSheet(rows: rows, selectedTotal: total, selectedLabel: Format.gb(total) + " selected",
-                           buttonTitle: n == 0 ? "Move to Trash" : n == 1 ? "Move 1 item to Trash" : "Move \(n) items to Trash",
-                           canTrash: n > 0 && driveConnected,
-                           notice: driveConnected ? nil : "\(driveName) is disconnected. Plug it back in to move these items.")
+        ReviewList(items: items, protected: protected, rules: rules)
+            .sheet(unchecked: unchecked, driveName: driveName, driveConnected: driveConnected)
     }
 
     /// The checked items that are not app-managed and hold nothing app-managed.
     public static func trashable(_ items: [BasketItem], unchecked: Set<String>, protected: [LensHit],
                                  rules: LensRules = .bundled) -> [BasketItem] {
-        items.filter { !unchecked.contains($0.path) && refusal(for: $0, protected: protected, rules: rules) == nil }
+        let index = ProtectedHits(protected)
+        return items.filter { !unchecked.contains($0.path) && refusalKind(for: $0, protected: index, rules: rules) == nil }
     }
 
     /// By the item's rule ID; only an item without one is looked up by path, and then never by a rule for its contents.
@@ -99,17 +88,21 @@ public struct ReviewSheet: Equatable, Sendable {
     /// The one predicate both the review sheet and `Trasher` use. It needs no `protected` list to refuse app-managed
     /// locations: the rules' own patterns refuse them and every folder that could hold one.
     static func refusalKind(for item: BasketItem, protected: [LensHit], rules: LensRules) -> Refusal? {
+        refusalKind(for: item, protected: ProtectedHits(protected), rules: rules)
+    }
+
+    static func refusalKind(for item: BasketItem, protected: ProtectedHits, rules: LensRules) -> Refusal? {
         let rule = rule(for: item, rules: rules)
         if item.safety == .appManaged || rule?.safety == .appManaged {
             return .managed(rule?.instruction ?? managedFallback)
         }
-        if let hit = item.managingHit(in: protected) {
+        if let hit = protected.managing(item.path) {
             return .managed(rules.rule(id: hit.ruleID)?.instruction ?? managedFallback)
         }
         let scan = rules.appManagedScan(item.path)
         if case .inside(let r)? = scan { return .managed(r.instruction ?? managedFallback) }
         if StructuralFolders.contains(item.path) { return .structural }
-        if let hit = item.containedHit(in: protected) {
+        if let hit = protected.contained(in: item.path) {
             let hitRule = rules.rule(id: hit.ruleID)
             return .holds("Contains \(hitRule?.name ?? hit.name). " + (hitRule?.instruction ?? managedFallback))
         }
@@ -117,9 +110,47 @@ public struct ReviewSheet: Equatable, Sendable {
         return nil
     }
 
-    /// The instruction shown instead of a checkbox, or nil when the item may be trashed.
-    static func refusal(for item: BasketItem, protected: [LensHit], rules: LensRules) -> String? {
-        refusalKind(for: item, protected: protected, rules: rules)?.instruction
+}
+
+/// The review sheet's rows with the rule lookups and refusals done, once per change to the basket or the drive's
+/// app-managed hits. A checkbox click only re-counts what is checked (`sheet(unchecked:…)`), with no lookups.
+public struct ReviewList: Equatable, Sendable {
+    public struct Entry: Equatable, Sendable {
+        public var item: BasketItem
+        /// Without its check state, which `sheet` fills in.
+        public var row: ReviewRow
+    }
+
+    public let entries: [Entry]
+
+    public init(items: [BasketItem], protected: [LensHit], rules: LensRules = .bundled) {
+        let index = ProtectedHits(protected)
+        entries = items.map { item in
+            let instruction = ReviewSheet.refusalKind(for: item, protected: index, rules: rules)?.instruction
+            let parent = item.path.split(separator: "/").dropLast().joined(separator: "/")
+            let row = ReviewRow(path: item.path, name: item.name, location: parent.isEmpty ? "Drive root" : parent,
+                                size: Format.gb(item.size),
+                                explanation: ReviewSheet.rule(for: item, rules: rules)?.explanation ?? ReviewSheet.notKnown,
+                                instruction: instruction, isChecked: instruction == nil)
+            return Entry(item: item, row: row)
+        }
+    }
+
+    /// The checked items that may be trashed, in basket order.
+    public func trashable(unchecked: Set<String>) -> [BasketItem] {
+        entries.filter { $0.row.isCheckable && !unchecked.contains($0.item.path) }.map(\.item)
+    }
+
+    public func sheet(unchecked: Set<String>, driveName: String, driveConnected: Bool) -> ReviewSheet {
+        var rows = entries.map(\.row)
+        for i in rows.indices where rows[i].isCheckable { rows[i].isChecked = !unchecked.contains(rows[i].path) }
+        let selected = trashable(unchecked: unchecked)
+        let total = selected.reduce(0) { $0 + $1.size }
+        let n = selected.count
+        return ReviewSheet(rows: rows, selectedTotal: total, selectedLabel: Format.gb(total) + " selected",
+                           buttonTitle: n == 0 ? "Move to Trash" : n == 1 ? "Move 1 item to Trash" : "Move \(n) items to Trash",
+                           canTrash: n > 0 && driveConnected,
+                           notice: driveConnected ? nil : "\(driveName) is disconnected. Plug it back in to move these items.")
     }
 }
 
