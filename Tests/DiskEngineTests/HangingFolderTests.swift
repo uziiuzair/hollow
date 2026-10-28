@@ -231,7 +231,9 @@ private func record(_ live: LiveIndex, _ path: String) async -> FolderRecord {
     let started = ContinuousClock.now
     let result = try await DiskScanner(root: root, storage: try Fixtures.tempDir(),
                                        lister: lister(hang, timeout: .milliseconds(300))).run()
-    #expect(ContinuousClock.now - started < .seconds(3))
+    // The hang is released only after the scan, so the scan ends only by the 300 ms open deadline; the bound leaves a
+    // loaded machine room (MallocScribble runs: 3.4 s and 4.2 s against the old 3 s bound).
+    #expect(ContinuousClock.now - started < .seconds(10))
     let index = result.index
     #expect(index.pending.isEmpty)
     #expect(index.folders[Int(index.folder(atRelativePath: "a")!)].flags.contains(.stale))
@@ -590,7 +592,9 @@ private func slowRead(_ seconds: Double) -> @Sendable (String, FolderID, @escapi
     for _ in 0..<100 where hang.opened.count < 8 { try await Task.sleep(for: .milliseconds(10)) }
     let started = ContinuousClock.now
     if case .skipped = await folders.list(path: "/queued", folder: 0) {} else { Issue.record("not skipped") }
-    #expect(ContinuousClock.now - started < .seconds(6.5))
+    // Well inside the 30 s open deadline, so only the 5 s stall rule can explain the skip; the bound leaves a loaded
+    // machine room (a MallocScribble run: 6.66 s against the old 6.5 s bound).
+    #expect(ContinuousClock.now - started < .seconds(20))
 }
 
 @Test func theScannerNeverAsksForMoreThanThePoolHas() async throws {
