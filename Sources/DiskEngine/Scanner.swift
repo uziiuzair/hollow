@@ -17,19 +17,29 @@ public struct ScanResult {
     public var unreadableFolders: Int
 }
 
-/// Walks a tree with up to `workers` directory listings in flight. Workers only
-/// read; the loop in `run()` is the single writer of the index.
+/// Walks a tree with up to `workers` directory listings in flight, never more than the lister has threads (so none
+/// waits on another of this scan's). Workers only read; the loop in `run()` is the single writer of the index.
 public final class DiskScanner: Sendable {
     public let root: URL
     public let storage: URL
     public let workers: Int
+    public let lister: DirectoryLister
+    /// Read as unreadable without being opened (no Full Disk Access); nil opens everything.
+    public let protected: ProtectedData?
+    /// The QoS the listings run at: userInitiated for a scan someone waits for, utility for a live index's applies.
+    public let qos: qos_class_t
     public let progress: AsyncStream<ScanProgress>
     private let progressSink: AsyncStream<ScanProgress>.Continuation
 
-    public init(root: URL, storage: URL, workers: Int = ProcessInfo.processInfo.activeProcessorCount) {
+    public init(root: URL, storage: URL, workers: Int = ProcessInfo.processInfo.activeProcessorCount,
+                lister: DirectoryLister = .shared, protected: ProtectedData? = nil,
+                qos: qos_class_t = QOS_CLASS_USER_INITIATED) {
         self.root = root
         self.storage = storage
-        self.workers = max(1, workers)
+        self.workers = max(1, min(workers, lister.threads))
+        self.lister = lister
+        self.protected = protected
+        self.qos = qos
         (progress, progressSink) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
@@ -67,6 +77,8 @@ public final class DiskScanner: Sendable {
     /// queued and in-flight folders and `checkpoint` runs; returning `.stop` ends the
     /// scan with those folders still pending. Cancelling the task does the same. On
     /// completion `pending` is empty. Returns the number of unreadable folders. Finishes `progress` when done.
+    /// The loop that writes `index`, and `checkpoint`, run on `isolation` (the caller's actor), so an actor that owns the
+    /// index never races it.
     public func scan(
         into index: ScanIndex,
         starting: [FolderID],
@@ -87,16 +99,30 @@ public final class DiskScanner: Sendable {
         var lastCheckpoint = clock.now
         var failure: (any Error)?
         var stopped = false
+        let lister = self.lister
+        let protected = self.protected
+        let qos = self.qos
 
         await withTaskGroup(of: DirectoryListing.self) { group in
+            // A closure is isolated to an `isolated` parameter only when it captures it (SE-0420). Without this capture
+            // the loop below, the index's one writer, ran on the global executor while its caller's actor (a
+            // `LiveIndex`) ran too, and the two raced on the index.
+            isolation?.assertIsolated("the scan loop must run on its caller's actor")
             func launch() {
                 while inFlight.count < workers, head < queue.count, !Task.isCancelled {
                     let folder = queue[head]
                     head += 1
                     let path = index.path(of: folder, rootPath: rootPath)
                     group.addTask(priority: .utility) {
-                        var reader = BulkDirectoryReader()
-                        return reader.list(path: path, folder: folder)
+                        if protected?.covers(path) == true {
+                            return DirectoryListing(folder: folder, outcome: .unreadable, entries: [])
+                        }
+                        // A folder that hangs, or finds no thread in time, reads as timed out: marked stale, and
+                        // the walk goes on without it.
+                        guard case .listed(let listing) = await lister.list(path: path, folder: folder, qos: qos) else {
+                            return DirectoryListing(folder: folder, outcome: .timedOut, entries: [])
+                        }
+                        return listing
                     }
                     inFlight.insert(folder)
                 }

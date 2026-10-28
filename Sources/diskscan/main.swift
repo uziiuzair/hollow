@@ -3,6 +3,8 @@ import DiskEngine
 import Foundation
 
 // diskscan <path> [--top N] [--memory] [--hold] [--store <dir>]
+// Before any scan: touching a cloud folder or file must never download it.
+forbidDatalessMaterialization()
 var arguments = Array(CommandLine.arguments.dropFirst())
 @MainActor func option(_ name: String) -> String? {
     guard let flag = arguments.firstIndex(of: name), flag + 1 < arguments.count else { return nil }
@@ -40,7 +42,7 @@ if let storeOption {
     let started = clock.now
     let opened = try await live.open()
     print("opened:  \(opened) in \(seconds(clock.now - started))")
-    print("total:   \(gb(await live.withIndex { $0.folders[0].totalAllocated }))")
+    print("total:   \(gb(try await live.read { $0.folders[0].totalAllocated }))")
     if showMemory { print("footprint: \(mb(MemoryReport.footprint()))") }
 
     signal(SIGINT, SIG_IGN)
@@ -55,10 +57,10 @@ if let storeOption {
     interrupt.resume()
 
     // Report only changes of 1 MB or more; FSEvents reports background churn constantly.
-    var last = await live.withIndex { $0.folders[0].totalAllocated }
+    var last = try await live.read { $0.folders[0].totalAllocated }
     while true {
         try await Task.sleep(for: .seconds(1))
-        let now = await live.withIndex { $0.folders[0].totalAllocated }
+        let now = try await live.read { $0.folders[0].totalAllocated }
         let delta = Int64(bitPattern: now &- last)
         if abs(delta) >= 1_000_000 {
             print(String(format: "changes applied: total %@ (%+.3f GB)", gb(now), Double(delta) / 1e9))

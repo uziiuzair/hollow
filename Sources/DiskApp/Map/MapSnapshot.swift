@@ -52,13 +52,16 @@ public struct ListRow: Equatable, Sendable {
     /// Size over the largest depth-1 size, capped at 1.
     public var fraction: Double
     public var kind: ContentKind?
+    /// A folder macOS won't let the app read (no Full Disk Access). It has no size and no block.
+    public var isUnreadable: Bool
 
-    public init(node: Int?, name: String, size: UInt64, fraction: Double, kind: ContentKind?) {
+    public init(node: Int?, name: String, size: UInt64, fraction: Double, kind: ContentKind?, isUnreadable: Bool = false) {
         self.node = node
         self.name = name
         self.size = size
         self.fraction = fraction
         self.kind = kind
+        self.isUnreadable = isUnreadable
     }
 }
 
@@ -72,9 +75,11 @@ public struct MapSnapshot: Equatable, Sendable {
     /// Parallel to `layout.rects`.
     public var nodes: [MapNode]
     public var list: [ListRow]
+    /// Direct child folders of the zoom folder that can't be read.
+    public var unreadableCount: Int
 
     public init(path: String, rootPath: String, crumbs: [Crumb], total: UInt64, period: Int,
-                layout: TreemapLayout, nodes: [MapNode], list: [ListRow]) {
+                layout: TreemapLayout, nodes: [MapNode], list: [ListRow], unreadableCount: Int = 0) {
         self.path = path
         self.rootPath = rootPath
         self.crumbs = crumbs
@@ -83,11 +88,40 @@ public struct MapSnapshot: Equatable, Sendable {
         self.layout = layout
         self.nodes = nodes
         self.list = list
+        self.unreadableCount = unreadableCount
+    }
+
+    public var unreadableNote: String? {
+        switch unreadableCount {
+        case 0: nil
+        case 1: "1 folder here can't be read."
+        default: "\(unreadableCount) folders here can't be read."
+        }
     }
 
     /// The file or folder on disk, or nil for a bucket.
     public func url(of node: Int) -> URL? {
         guard nodes.indices.contains(node), nodes[node].kind != nil else { return nil }
         return URL(fileURLWithPath: rootPath + "/" + nodes[node].key)
+    }
+}
+
+extension MapSnapshot {
+    /// What rect `rect` would put in the basket: nil for a bucket, the root or a rect this snapshot does not have.
+    public func basketItem(at rect: Int) -> BasketItem? {
+        guard nodes.indices.contains(rect), layout.rects.indices.contains(rect) else { return nil }
+        return BasketItem.from(node: nodes[rect], size: layout.rects[rect].size)
+    }
+
+    /// What a drop of a press on `key` adds: that item as this level shows it now, or nil when it is no longer a
+    /// top-level block here (the map was rebuilt, zoomed or the item went away during the drag).
+    public func basketItem(droppedKey key: String) -> BasketItem? {
+        topLevelRect(forKey: key).flatMap { basketItem(at: $0) }
+    }
+
+    /// The top-level rect showing `key` now, or nil when it is no longer a block at this level. A menu holds the
+    /// key, not an index, so a rebuild while it is open can't redirect its choice to another block.
+    public func topLevelRect(forKey key: String) -> Int? {
+        (0..<layout.topLevelCount).first(where: { nodes.indices.contains($0) && nodes[$0].key == key })
     }
 }

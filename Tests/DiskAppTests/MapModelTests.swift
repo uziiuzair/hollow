@@ -159,3 +159,136 @@ import Testing
     #expect(published == 1)
     sub.cancel()
 }
+
+@MainActor @Test func reattachAfterRefusedEjectShowsTheMapAgain() async throws {
+    let src = try await FakeMapSource(["a/b/f.bin": 2_000_000, "a/c.bin": 1_200_000]); let m = model(src)
+    await m.open(path: "a", select: "a/b"); await m.settle()
+    m.driveDisconnected()
+    #expect(m.status == .offline && src.holds == 0)
+    let fresh = try await FakeMapSource(["a/b/f.bin": 2_000_000, "a/c.bin": 1_200_000])
+    await m.reattach(to: fresh); await m.settle()
+    #expect(m.status == .ready && fresh.holds == 1 && m.zoomPath == "a" && m.snapshot?.nodes[m.selected!].key == "a/b")
+    await m.reattach(to: src)
+    #expect(src.holds == 0 && fresh.holds == 1)
+}
+
+@MainActor @Test func reattachDoesNothingUnlessDisconnected() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src)
+    let other = try await FakeMapSource(["a/f.bin": 2_000_000])
+    // Never opened, then open and ready, then closed by the window: none of these is a disconnect.
+    await m.reattach(to: other)
+    await m.open(path: "", select: nil); await m.settle()
+    await m.reattach(to: other)
+    m.close()
+    await m.reattach(to: other)
+    #expect(other.holds == 0 && other.builds == 0)
+}
+
+@Test func changesOutsideTheZoomedFolderAreInvisible() {
+    #expect(MapModel.visibleDelta(IndexChange(generation: 2, folders: ["b": 5_000_000]), zoomPath: "a") == 0)
+    #expect(MapModel.visibleDelta(IndexChange(generation: 2, folders: ["a/x": -3_000_000, "ab": 9, "b": 9]), zoomPath: "a") == 3_000_000)
+    #expect(MapModel.visibleDelta(IndexChange(generation: 2, folders: ["": 1]), zoomPath: "a") == nil)
+    #expect(MapModel.visibleDelta(IndexChange(generation: 2, folders: ["b": 7]), zoomPath: "") == 7)
+    #expect(MapModel.visibleDelta(IndexChange(generation: 2, folders: nil), zoomPath: "a") == nil)
+    #expect(MapModel.visibleDelta(nil, zoomPath: "") == nil)
+}
+
+// C16: two updates merged before the map reads them still count the change inside the zoomed folder.
+@Test func mergedChangesKeepTheZoomedFolderDelta() {
+    let merged = IndexChange(generation: 2, folders: ["b": 9_000_000]).merged(with: IndexChange(generation: 3, folders: ["a/x": 40_000]))
+    #expect(MapModel.visibleDelta(merged, zoomPath: "a") == 40_000)
+    #expect(MapModel.visibleDelta(merged, zoomPath: "a/x/y") == nil)
+}
+
+@MainActor @Test func tinyChangesWaitUntilTheyShow() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src, throttle: .milliseconds(10))
+    m.setSize(CGSize(width: 10, height: 10))
+    await m.open(path: "a", select: nil); await m.settle(); let before = src.builds
+    m.sourceChanged(IndexChange(generation: 2, folders: ["a": 1_000])); await m.settle()
+    #expect(src.builds == before)
+    m.sourceChanged(IndexChange(generation: 3, folders: ["a": 30_000])); await m.settle()
+    #expect(src.builds == before + 1)
+    m.sourceChanged(IndexChange(generation: 4, folders: ["zzz": 9_000_000])); await m.settle()
+    #expect(src.builds == before + 1)
+}
+
+@MainActor @Test func hiddenWindowBuildsOnceWhenShown() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src, throttle: .milliseconds(10))
+    await m.open(path: "", select: nil); await m.settle(); let before = src.builds
+    m.isVisible = false
+    for _ in 0..<3 { m.sourceChanged() }; await m.settle()
+    #expect(src.builds == before)
+    m.isVisible = true; await m.settle()
+    #expect(src.builds == before + 1)
+    // Shown again with nothing new: no build.
+    m.isVisible = false; m.isVisible = true; await m.settle()
+    #expect(src.builds == before + 1)
+}
+
+// C22: a reattach builds at once, and what was pending before the disconnect (a tiny sum, a hidden window's dirty
+// flag) is dropped rather than carried onto the new controller.
+@MainActor @Test func reattachBuildsEvenWithPendingTinyChanges() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src, throttle: .milliseconds(10))
+    m.setSize(CGSize(width: 10, height: 10))
+    await m.open(path: "a", select: nil); await m.settle()
+    m.sourceChanged(IndexChange(generation: 2, folders: ["a": 15_000])); await m.settle()
+    m.isVisible = false; m.sourceChanged(); await m.settle()
+    m.driveDisconnected()
+    m.isVisible = true
+    let fresh = try await FakeMapSource(["a/f.bin": 2_000_000])
+    await m.reattach(to: fresh); await m.settle()
+    #expect(fresh.builds == 1 && m.status == .ready)
+    m.sourceChanged(IndexChange(generation: 3, folders: ["a": 10_000])); await m.settle()
+    #expect(fresh.builds == 1)
+}
+
+// Fix round 1: what moved, not the net, decides; a block renamed at the zoom level or one below always shows.
+@Test func movesAndRenamesUnderTheZoomAreVisible() {
+    let move = IndexChange(generation: 2, folders: ["a": 0], moved: ["a": 4_000_000], renamed: ["a", "a/d"])
+    #expect(MapModel.visibleDelta(move, zoomPath: "a") == nil)
+    #expect(MapModel.visibleDelta(move, zoomPath: "") == nil)
+    let deep = IndexChange(generation: 2, folders: ["a/b/c": 0], moved: ["a/b/c": 6], renamed: ["a/b/c"])
+    #expect(MapModel.visibleDelta(deep, zoomPath: "a") == 6)
+    #expect(MapModel.visibleDelta(deep, zoomPath: "a/b") == nil)
+    let quiet = IndexChange(generation: 2, folders: ["a/x": 0], moved: ["a/x": 3_000])
+    #expect(MapModel.visibleDelta(quiet, zoomPath: "a") == 3_000)
+}
+
+@MainActor @Test func aMoveIntoAChildOfTheZoomBuilds() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src, throttle: .milliseconds(10))
+    m.setSize(CGSize(width: 10, height: 10))
+    await m.open(path: "", select: nil); await m.settle(); let before = src.builds
+    // Deeper than one level below the zoom, so only the moved bytes (2 × 1 MB) can make it show.
+    m.sourceChanged(IndexChange(generation: 2, folders: ["a/x": 0], moved: ["a/x": 2_000_000], renamed: ["a/x", "a/x/d"]))
+    await m.settle()
+    #expect(src.builds == before + 1)
+}
+
+@MainActor @Test func aCrossGenerationMoveStillBuilds() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src, throttle: .milliseconds(10))
+    m.setSize(CGSize(width: 10, height: 10))
+    await m.open(path: "a", select: nil); await m.settle(); let before = src.builds
+    let out = IndexChange(generation: 2, folders: ["a/x/y": 400_000], moved: ["a/x/y": 400_000])
+    let back = IndexChange(generation: 3, folders: ["a/x": -400_000], moved: ["a/x": 400_000])
+    m.sourceChanged(out.merged(with: back)); await m.settle()
+    #expect(src.builds == before + 1)
+}
+
+@MainActor @Test func aSameSizeRenameDirectlyUnderTheZoomBuilds() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src, throttle: .milliseconds(10))
+    await m.open(path: "", select: nil); await m.settle(); let before = src.builds
+    m.sourceChanged(IndexChange(generation: 2, folders: ["a": 0], moved: ["a": 0], renamed: ["a"])); await m.settle()
+    #expect(src.builds == before + 1)
+}
+
+@MainActor @Test func hidingDropsAScheduledBuildUntilShown() async throws {
+    let src = try await FakeMapSource(["a/f.bin": 2_000_000]); let m = model(src, throttle: .milliseconds(300))
+    await m.open(path: "", select: nil); await m.settle(); let before = src.builds
+    m.sourceChanged()   // builds at once
+    m.sourceChanged()   // scheduled for the end of the throttle window
+    m.isVisible = false
+    try await Task.sleep(for: .milliseconds(400)); await m.settle()
+    #expect(src.builds == before + 1)
+    m.isVisible = true; await m.settle()
+    #expect(src.builds == before + 2)
+}

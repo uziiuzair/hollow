@@ -50,16 +50,20 @@ public struct DropdownModel: Equatable, Sendable {
     public var footerRight: FooterAction
     /// The drive is connected, so "Open map" works.
     public var canOpenMap: Bool
+    /// "Review N GB to clear": shown while the drive is connected and the lens found at least 0.1 GB that regenerates.
+    public var reviewTitle: String?
+    /// Shown while macOS denies Full Disk Access.
+    public var accessNote: String?
 
     private static let barOrder: [ContentKind] = [.appData, .virtualMachines, .developer, .media, .apps, .documents, .caches, .other]
     private static let minus = "\u{2212}"
 
     public static func make(drives: [KnownDrive], selected: String, connected: Set<String>, summary: DriveSummary?,
                             space: VolumeSpace?, activity: DriveActivity, period: Int, connectedSince: Date?,
-                            now: Date) -> DropdownModel {
+                            now: Date, clearable: UInt64? = nil, fullDiskAccess: FDAStatus = .granted) -> DropdownModel {
         let tabs = tabList(drives, selected: selected, connected: connected)
         let drive = drives.first { $0.uuid == selected }
-        let isInternal = drive?.tintIndex == 0
+        let isInternal = drive?.isInternal == true
         let isOnline = connected.contains(selected)
 
         let (title, detail) = freeText(drive: drive, space: space, isOnline: isOnline)
@@ -104,12 +108,14 @@ public struct DropdownModel: Equatable, Sendable {
                              showsReclaimable: showsReclaimable, rows: rows, netLabel: netLabel, netValue: netValue,
                              netIsGrowth: netIsGrowth, emptyMessage: empty, footerLeft: footerLeft,
                              footerRight: !isOnline ? .none : (isInternal ? .settings : .eject),
-                             canOpenMap: isOnline)
+                             canOpenMap: isOnline,
+                             reviewTitle: clearable.flatMap { isOnline && $0 >= 100_000_000 ? "Review " + Format.gb($0) + " to clear" : nil },
+                             accessNote: fullDiskAccess == .denied ? "Some folders can't be read without Full Disk Access." : nil)
     }
 
     private static func tabList(_ drives: [KnownDrive], selected: String, connected: Set<String>) -> [Tab] {
-        let internalDrives = drives.filter { $0.tintIndex == 0 }
-        let others = drives.filter { $0.tintIndex != 0 }.sorted { $0.lastSeen > $1.lastSeen }
+        let internalDrives = drives.filter(\.isInternal)
+        let others = drives.filter { !$0.isInternal }.sorted { $0.lastSeen > $1.lastSeen }
         return (internalDrives + others).map {
             Tab(uuid: $0.uuid, name: $0.name, tintIndex: $0.tintIndex, isSelected: $0.uuid == selected,
                 isOffline: !connected.contains($0.uuid))

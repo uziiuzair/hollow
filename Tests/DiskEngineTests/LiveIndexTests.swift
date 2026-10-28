@@ -42,9 +42,11 @@ import Testing
     try Fixtures.write(root.appending(path: "a/b/c/d/g.bin"), bytes: 1_500_000)
     try FileManager.default.removeItem(at: root.appending(path: "a/b/c/f.bin"))
     let base = Fixtures.realPath(root)
+    // Real IDs: a rescan request at or below where the opening scan began is already covered by it.
+    let id = await live.withIndex { $0.lastEventID } + 1_000_000_000
     try await live.apply([
-        FSChange(path: base + "/a", id: 5, rescanSubtree: true, historyLost: false),
-        FSChange(path: "/somewhere/else", id: 6, rescanSubtree: false, historyLost: false),
+        FSChange(path: base + "/a", id: id + 5, rescanSubtree: true, historyLost: false),
+        FSChange(path: "/somewhere/else", id: id + 6, rescanSubtree: false, historyLost: false),
     ])
     #expect(await live.withIndex { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root))
     try await live.close()
@@ -88,4 +90,21 @@ import Testing
     let dir = try LiveIndex.storeDirectory(base: try Fixtures.tempDir(), volume: tmp)
     #expect(dir.lastPathComponent == uuid)
     #expect(FileManager.default.fileExists(atPath: dir.path))
+}
+
+@Test func unreadableFoldersAreReadOnRetry() async throws {
+    let root = try Fixtures.tree(["a/locked/f.bin": 2_000_000, "a/open.bin": 1_200_000])
+    let locked = root.appending(path: "a/locked").path
+    chmod(locked, 0); defer { chmod(locked, 0o755) }
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir())
+    // Only the retry may read a/locked: a replayed event relisting it after the chmod would leave nothing to retry.
+    await live.disableWatcher()
+    _ = try await live.open()
+    #expect(await live.withIndex { $0.folders[Int($0.folder(atRelativePath: "a/locked")!)].flags.contains(.unreadable) })
+    #expect(try await live.retryUnreadable() == 0)
+    chmod(locked, 0o755)
+    #expect(try await live.retryUnreadable() == 1)
+    #expect(await live.withIndex { $0.folders[Int($0.folder(atRelativePath: "a/locked")!)].flags.contains(.unreadable) } == false)
+    #expect(await live.withIndex { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root))
+    try await live.close()
 }

@@ -57,8 +57,13 @@ public struct EventPathMapper: Sendable, Equatable {
 
     /// The mount point of the device holding `path`, or nil when statfs fails.
     public static func mountPoint(of path: String) -> String? {
+        try? requireMountPoint(of: path)
+    }
+
+    /// The mount point of the device holding `path`; throws statfs's own errno when it fails.
+    public static func requireMountPoint(of path: String) throws -> String {
         var fs = statfs()
-        guard statfs(path, &fs) == 0 else { return nil }
+        guard statfs(path, &fs) == 0 else { throw DiskEngineError.posix("statfs \(path)", errno) }
         return withUnsafeBytes(of: &fs.f_mntonname) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
     }
 }

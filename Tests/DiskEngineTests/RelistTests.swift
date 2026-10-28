@@ -10,7 +10,7 @@ private func scanned(_ root: URL) async throws -> ScanIndex {
 private func relist(_ idx: ScanIndex, _ rel: String) throws -> [FolderID] {
     var r = BulkDirectoryReader()
     let id = try #require(idx.folder(atRelativePath: rel))
-    return try idx.relist(r.list(path: idx.path(of: id, rootPath: idx.rootPath), folder: id))
+    return try idx.relist(r.list(path: idx.path(of: id, rootPath: idx.rootPath), folder: id)).newFolders
 }
 
 @Test func addedFileUpdatesAncestors() async throws {

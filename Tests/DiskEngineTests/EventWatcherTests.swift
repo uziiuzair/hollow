@@ -24,15 +24,13 @@ import Testing
     let root = try Fixtures.tree(["watched/": 0])
     var st = stat()
     stat(root.path, &st)
-    let w = EventWatcher(device: st.st_dev, since: 0, latency: 0.2)
+    let rootPath = Fixtures.realPath(root)
+    let mapper = EventPathMapper(rootPath: rootPath, mountPoint: try #require(EventPathMapper.mountPoint(of: rootPath)))
+    // A concrete start ID: events after it arrive even if the stream starts late. No sleep.
+    let w = EventWatcher(device: st.st_dev, since: FSEventsGetCurrentEventId(), latency: 0.2)
     try w.start()
     defer { w.stop() }
-    try await Task.sleep(for: .milliseconds(500))
     try Data([1]).write(to: root.appending(path: "watched/new"))
-    let target = Fixtures.realPath(root.appending(path: "watched"))
-    for await batch in w.changes {
-        let trimmed = batch.map { "/" + $0.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-        if trimmed.contains(where: { target.hasSuffix($0) && $0.count > 1 }) { return }
-    }
+    for await batch in w.changes where batch.contains(where: { mapper.absolute($0.path) == rootPath + "/watched" }) { return }
     Issue.record("no event for the changed folder")
 }

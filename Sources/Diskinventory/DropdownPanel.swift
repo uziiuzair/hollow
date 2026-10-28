@@ -20,6 +20,8 @@ final class DropdownPanel: NSPanel {
     /// Called after the panel hides itself (Esc, resigning key).
     var onDismiss: (() -> Void)?
     var closesOnResign = true
+    /// ⌘, while the panel is key: the app menu is not reachable from here.
+    var onOpenSettings: (() -> Void)?
     private let hosting: FittingHostingView<AnyView>
 
     init(rootView: some View) {
@@ -57,6 +59,14 @@ final class DropdownPanel: NSPanel {
     override func resignKey() {
         super.resignKey()
         if closesOnResign { dismiss() }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, event.charactersIgnoringModifiers == "," {
+            onOpenSettings?()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     override func cancelOperation(_ sender: Any?) { dismiss() }

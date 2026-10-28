@@ -3,6 +3,11 @@ import DiskApp
 import DiskEngine
 import SwiftUI
 
+/// Where the review sheet is: checking the list, moving, or showing what happened.
+enum ReviewPhase: Equatable {
+    case review, moving, done(TrashOutcome)
+}
+
 /// The window's own UI state: the search field and command list, and the drive chip.
 @MainActor
 final class MapWindowState: ObservableObject {
@@ -13,15 +18,20 @@ final class MapWindowState: ObservableObject {
     @Published var blurRequest = 0
     @Published var commandIndex = 0
     @Published var free: String?
+    @Published var reviewShown = false
+    @Published var reviewPhase = ReviewPhase.review
 
     let driveName: String
-    let tint: Color
+    @Published var tint: Color
     let isInternal: Bool
+    /// This drive's basket, shared with the dropdown's "Review N GB to clear".
+    let basket: Basket
 
-    init(driveName: String, tint: Color, isInternal: Bool) {
+    init(driveName: String, tint: Color, isInternal: Bool, basket: Basket) {
         self.driveName = driveName
         self.tint = tint
         self.isInternal = isInternal
+        self.basket = basket
     }
 
     /// The command list for the current query and selection.
@@ -32,7 +42,19 @@ final class MapWindowState: ObservableObject {
         let top = 0..<snapshot.layout.topLevelCount
         let realSelection = model.selected.map { snapshot.nodes[$0].kind != nil } ?? false
         let children = top.filter { snapshot.nodes[$0].kind != nil }.map { (name: snapshot.nodes[$0].name, key: snapshot.nodes[$0].key) }
-        return MapCommands.items(query: query, hasSelection: realSelection, canZoomOut: !model.zoomPath.isEmpty, children: children)
+        return MapCommands.items(query: query, hasSelection: realSelection, canZoomOut: !model.zoomPath.isEmpty, children: children,
+                                 canAddToBasket: canAddSelection(model))
+    }
+
+    /// What map rect `rect` would put in the basket, or nil for a bucket or the root.
+    func basketItem(_ model: MapModel, rect: Int) -> BasketItem? {
+        model.snapshot?.basketItem(at: rect)
+    }
+
+    /// The selection is a real item that is not already in the basket (itself or inside a folder there).
+    func canAddSelection(_ model: MapModel) -> Bool {
+        guard let selected = model.selected, let item = basketItem(model, rect: selected) else { return false }
+        return basket.accepts(item)
     }
 }
 
@@ -42,6 +64,17 @@ struct MapWindowActions {
     var zoomIn: () -> Void
     var quickLook: () -> Void
     var openCommands: () -> Void
+    var addToBasket: () -> Void
+    /// A press moving a block or list row; `drop` ends it.
+    var drag: (BasketDrag) -> Void
+    var drop: (BasketDrag) -> Void
+    var review: () -> Void
+    /// The review sheet's move, and the drive's app-managed hits it may never move.
+    var trash: ([BasketItem]) async -> TrashOutcome
+    var protected: () -> [LensHit]
+    /// The right-click menu for a top-level block or row, and what choosing an item does (it selects the item first).
+    var contextItems: (Int) -> [MapContextItem]
+    var chooseContext: (MapContextAction, String) -> Void
 }
 
 /// Colors from the approved flat mockup, on the native window background.
@@ -82,11 +115,16 @@ private struct KeyBadge: View {
 struct MapWindowView: View {
     @ObservedObject var model: MapModel
     @ObservedObject var ui: MapWindowState
+    @ObservedObject var basket: Basket
     let pointer: MapPointer
+    let dragState: BasketDragState
     let mapView: TreemapMTKView?
     let actions: MapWindowActions
 
     @FocusState private var searchFocus: Bool
+
+    /// The window content's coordinate space, top-left origin: drags and the basket bar's frame are measured in it.
+    nonisolated static let space = "mapWindow"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -96,7 +134,8 @@ struct MapWindowView: View {
                 HStack(spacing: 0) {
                     mapArea
                     Rectangle().fill(Tokens.line).frame(width: 0.5)
-                    SideList(model: model, tint: ui.tint)
+                    SideList(model: model, tint: ui.tint, drag: actions.drag, drop: actions.drop,
+                             contextItems: actions.contextItems, chooseContext: actions.chooseContext)
                         .frame(width: MapWindowLayout.listWidth(windowWidth: geo.size.width))
                 }
             }
@@ -112,7 +151,13 @@ struct MapWindowView: View {
         }
         .font(.system(size: 13))
         .background(Tokens.bg)
+        .coordinateSpace(name: Self.space)
         .ignoresSafeArea()
+        .sheet(isPresented: $ui.reviewShown) {
+            ReviewSheetView(basket: basket, phase: $ui.reviewPhase, protected: actions.protected, driveName: ui.driveName,
+                            driveConnected: model.status != .offline, move: actions.trash,
+                            close: { ui.reviewShown = false })
+        }
         .onChange(of: searchFocus) { _, focused in ui.searchFocused = focused }
         .onChange(of: ui.focusRequest) { _, _ in searchFocus = true }
         .onChange(of: ui.blurRequest) { _, _ in searchFocus = false }
@@ -122,6 +167,7 @@ struct MapWindowView: View {
 
     private var toolbar: some View {
         HStack(spacing: 10) {
+            backButton
             driveChip
             breadcrumb
             Spacer(minLength: 10)
@@ -129,6 +175,21 @@ struct MapWindowView: View {
         }
         .padding(.leading, 78).padding(.trailing, 14)
         .frame(height: 52)
+    }
+
+    private var backButton: some View {
+        let atRoot = model.zoomPath.isEmpty
+        return Button { model.zoomOut() } label: {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7).padding(.vertical, 4)
+                .contentShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+        .disabled(atRoot)
+        .opacity(atRoot ? 0.35 : 1)
+        .help("Enclosing folder (\u{2318}\u{2191})")
     }
 
     private var driveChip: some View {
@@ -204,7 +265,7 @@ struct MapWindowView: View {
     private var mapArea: some View {
         ZStack {
             if let mapView {
-                TreemapView(view: mapView, model: model, pointer: pointer)
+                TreemapView(view: mapView, model: model, pointer: pointer, onDrag: actions.drag, onDrop: actions.drop)
                     .opacity(model.snapshot == nil ? 0 : 1)
                     .overlay { HoverCardOverlay(model: model, pointer: pointer) }
             } else {
@@ -218,6 +279,10 @@ struct MapWindowView: View {
             }
         }
         .padding(10)
+        .overlay(alignment: .bottom) {
+            BasketBar(basket: basket, dragState: dragState, clear: { basket.clear() }, review: actions.review)
+                .padding(.horizontal, 16).padding(.bottom, 12)
+        }
     }
 
     // MARK: Key bar
@@ -237,6 +302,9 @@ struct MapWindowView: View {
             keyButton("Zoom in", "↵", primary: canZoom, action: actions.zoomIn)
                 .opacity(canZoom ? 1 : 0.5).disabled(!canZoom)
             keyButton("Quick Look", "Space", primary: false, action: actions.quickLook)
+            let canAdd = ui.canAddSelection(model)
+            keyButton("Add to basket", "⌫", primary: false, action: actions.addToBasket)
+                .opacity(canAdd ? 1 : 0.5).disabled(!canAdd)
             keyButton("Actions", "⌘K", primary: false, action: actions.openCommands)
         }
         .font(.system(size: 12))
@@ -262,6 +330,11 @@ struct MapWindowView: View {
 private struct SideList: View {
     @ObservedObject var model: MapModel
     let tint: Color
+    let drag: (BasketDrag) -> Void
+    let drop: (BasketDrag) -> Void
+    let contextItems: (Int) -> [MapContextItem]
+    let chooseContext: (MapContextAction, String) -> Void
+    @State private var rowDrag: BasketDrag?
 
     var body: some View {
         let snapshot = model.snapshot
@@ -277,10 +350,20 @@ private struct SideList: View {
                 }
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 8)
+                .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, snapshot.unreadableNote == nil ? 8 : 2)
+                if let note = snapshot.unreadableNote {
+                    Text(note)
+                        .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8).padding(.bottom, 8)
+                }
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(snapshot.list.enumerated()), id: \.offset) { _, row in
+                            if row.isUnreadable {
+                                // Inert: no hover, selection or drag.
+                                UnreadableRowView(name: row.name)
+                            } else {
                             ListRowView(row: row, selected: row.node != nil && row.node == model.selected,
                                         hovered: row.node != nil && row.node == hoveredTop, tint: tint)
                                 .onHover { inside in
@@ -288,6 +371,31 @@ private struct SideList: View {
                                     else if model.hovered == row.node { model.hovered = nil }
                                 }
                                 .onTapGesture { if let node = row.node { model.select(node) } }
+                                // Simultaneous, so a single click selects at once; a double-click selects, then opens a folder.
+                                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                                    guard let node = row.node, let snapshot = model.snapshot,
+                                          snapshot.nodes.indices.contains(node) else { return }
+                                    model.select(node)
+                                    if MapClick.opensFolder(clickCount: 2, isFolder: snapshot.nodes[node].isFolder) {
+                                        model.zoomIn(node)
+                                    }
+                                })
+                                .contextMenu {
+                                    // The menu holds the item's key, not its index: a rebuild while it is open can't retarget it.
+                                    if let node = row.node, let snapshot = model.snapshot, snapshot.nodes.indices.contains(node) {
+                                        let key = snapshot.nodes[node].key
+                                        ForEach(Array(contextItems(node).enumerated()), id: \.offset) { _, item in
+                                            if item.action == .separator {
+                                                Divider()
+                                            } else {
+                                                Button(item.title) { chooseContext(item.action, key) }.disabled(!item.isEnabled)
+                                            }
+                                        }
+                                    }
+                                }
+                                // Rows without a node (the remainder, unreadable folders) can't be dragged (C21).
+                                .gesture(rowDragGesture(row.node ?? -1), including: row.node == nil ? .none : .all)
+                            }
                         }
                     }
                 }
@@ -296,6 +404,47 @@ private struct SideList: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 10).padding(.horizontal, 8)
+    }
+
+    /// A press on row `node`, keyed by the node it shows now.
+    private func press(at point: CGPoint, node: Int) -> BasketDrag {
+        let key = model.snapshot.flatMap { $0.nodes.indices.contains(node) ? $0.nodes[node].key : nil }
+        return BasketDrag(at: point, item: node, key: key)
+    }
+
+    /// Feeds the same drag the map's blocks do, in the window's coordinate space.
+    private func rowDragGesture(_ node: Int) -> some Gesture {
+        DragGesture(minimumDistance: BasketDrag.threshold, coordinateSpace: .named(MapWindowView.space))
+            .onChanged { value in
+                var d = rowDrag.flatMap { $0.item == node ? $0 : nil } ?? press(at: value.startLocation, node: node)
+                d.move(to: value.location)
+                rowDrag = d
+                drag(d)
+            }
+            .onEnded { value in
+                var d = rowDrag.flatMap { $0.item == node ? $0 : nil } ?? press(at: value.startLocation, node: node)
+                d.move(to: value.location)
+                rowDrag = nil
+                drop(d)
+            }
+    }
+}
+
+private struct UnreadableRowView: View {
+    let name: String
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "lock").font(.system(size: 10))
+                .frame(width: 18, alignment: .leading)
+            Text(name).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 8)
+            Text("Can't read")
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8).padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .help("Allow Full Disk Access in System Settings to see inside.")
     }
 }
 

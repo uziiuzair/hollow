@@ -9,6 +9,7 @@ import Testing
             .flatMap { if case .item(let i) = $0 { i } else { nil } }
     }
     #expect(item(0, "Quit Diskinventory") == .init(title: "Quit Diskinventory", key: "q", selector: "terminate:"))
+    #expect(item(0, "Settings…") == .init(title: "Settings…", key: ",", selector: "openSettings:"))
     #expect(item(0, "Hide Diskinventory")?.selector == "hide:")
     #expect(item(0, "Hide Others") == .init(title: "Hide Others", key: "h", modifiers: [.command, .option], selector: "hideOtherApplications:"))
     #expect(item(1, "Undo")?.selector == "undo:")

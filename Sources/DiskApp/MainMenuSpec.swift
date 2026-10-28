@@ -38,6 +38,8 @@ public enum MainMenuSpec {
             Menu(title: appName, items: [
                 i("About \(appName)", "", "orderFrontStandardAboutPanel:"),
                 .separator,
+                i("Settings\u{2026}", ",", "openSettings:"),
+                .separator,
                 i("Hide \(appName)", "h", "hide:"),
                 i("Hide Others", "h", "hideOtherApplications:", [.command, .option]),
                 i("Show All", "", "unhideAllApplications:"),

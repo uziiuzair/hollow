@@ -9,6 +9,18 @@ enum Fixtures {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
+
+    /// `realpath(3)` of a URL; keeps the `/private` prefix of temp folders.
+    static func realPath(_ url: URL) -> String {
+        guard let p = realpath(url.path, nil) else { return url.path }
+        defer { free(p) }
+        return String(cString: p)
+    }
+
+    static func allocatedSize(_ url: URL) -> UInt64 {
+        let values = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey])
+        return UInt64(values?.totalFileAllocatedSize ?? 0)
+    }
 }
 
 extension Fixtures {

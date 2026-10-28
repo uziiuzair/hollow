@@ -17,7 +17,7 @@ public struct HoverCard: Equatable, Sendable {
 
     static let changeThreshold: Int64 = 100_000_000
 
-    public static func make(node: MapNode, size: UInt64, period: Int) -> HoverCard {
+    public static func make(node: MapNode, size: UInt64, period: Int, rules: LensRules = .bundled) -> HoverCard {
         var change: String?
         if node.growth.magnitude >= UInt64(changeThreshold) {
             let words = Format.periodWords(period)
@@ -30,7 +30,7 @@ public struct HoverCard: Equatable, Sendable {
         } else if node.key.hasSuffix("#more") {
             explanation = "Too many items to draw one by one here. Zoom in to see them."
         } else {
-            explanation = KnownItems.explanation(for: node.key)
+            explanation = rules.explanation(for: node.key)
         }
         return HoverCard(title: node.name, detail: Format.gb(size), change: change,
                          changeIsGrowth: node.growth > 0, explanation: explanation)

@@ -1,5 +1,6 @@
 import DiskEngine
 import Foundation
+import os
 
 public enum DriveActivity: Equatable, Sendable {
     case idle, opening, scanning, ready, offline
@@ -15,6 +16,17 @@ public final class DriveController: ObservableObject {
     @Published public private(set) var activity: DriveActivity = .idle
     /// Rises by one each time the open index changes, across re-warms.
     @Published public private(set) var generation = 0
+    /// What the open index's last update changed; set just before `generation` rises.
+    @Published public private(set) var lastChange: IndexChange?
+    /// Every update since the last `takeChange()`, merged, so a reader that falls behind loses none (C16). Kept only
+    /// while something observes changes: a new observer builds its map anyway, so nothing older is owed to it.
+    private var pendingChange: IndexChange?
+    private var changeObservers = 0
+    /// The cleanup lens over the open index. Kept across a cool, so the dropdown still has it.
+    @Published public private(set) var lens: LensReport?
+    /// Every app-managed hit of the last lens walk, of any size and uncapped: the `protected` set for the review sheet and
+    /// the Trasher. `lens` keeps only the hits big enough to show.
+    public private(set) var protectedHits: [LensHit] = []
     @Published public var period: Int = 7 {
         didSet {
             guard period != oldValue else { return }
@@ -26,12 +38,18 @@ public final class DriveController: ObservableObject {
     public let volume: VolumeInfo
     private let store: URL
     private let coolDown: Duration
+    /// Relative paths the index leaves out; passed to every index this controller opens.
+    private var exclusions: Set<String>
+    /// Whether to retry unreadable folders after an open: false while macOS still denies access.
+    private let fullDiskAccess: @Sendable () -> Bool
     private var index: LiveIndex?
     private var timer: Task<Void, Never>?
     private var timerID = 0
     private var unmounting = false
     /// The open in progress, so an unmount can cut its scan short.
     private var opening: Task<OpenedFrom, any Error>?
+    /// The retry of unreadable folders after an open, so an unmount can cut its scan short too (it stays resumable).
+    private var retrying: Task<Void, Never>?
     private var spaceRead: Task<Void, Never>?
     /// Every warm/cool/unmount body runs through this chain, strictly one at a time.
     private var lifecycle: Task<Void, Never>?
@@ -40,12 +58,39 @@ public final class DriveController: ObservableObject {
     /// Counts the open index's updates into `generation`; lives from open to close.
     private var watching: Task<Void, Never>?
     private(set) var cachedBaseline: (period: Int, day: Day, snapshot: SizeSnapshot?)?
+    /// The lens walk started after the drive turned ready (C25), off the lifecycle chain.
+    private var lensTask: Task<Void, Never>?
+    private var lensTaskID = 0
+    /// Orders lens walks: only a walk started after the one that set `lens` may replace it.
+    private var lensRequests = 0
+    private var lensApplied = 0
+    /// What each move to the Trash removed from the lens, in order: a walk that started before a move applies the
+    /// removals made since its start before it publishes, so the moved items don't come back. Cleared on a cool.
+    private var lensRemovals: [[String: UInt64]] = []
+    /// Tests only: how many lens walks have started.
+    private(set) var lensWalks = 0
+    /// Set when an unmount begins; read off main by a trash in progress, so it stops between items.
+    private let stopFlag = OSAllocatedUnfairLock(initialState: false)
+    nonisolated var stopRequested: Bool { stopFlag.withLock { $0 } }
+    /// Tests only: the `protected` set the last trash used.
+    private(set) var lastProtected: [LensHit] = []
+    private static let log = Logger(subsystem: AppIdentity.bundleID, category: "index")
     /// Tests only: runs between a map build's index read and its unmount check.
     var afterMapRead: (() async -> Void)?
+    /// Tests only: runs between a lens walk's last chunk and its publish.
+    var beforeLensPublish: (() async -> Void)?
+    /// Tests only: runs off main just before the unreadable-folder retry starts its scan.
+    var beforeRetryScan: (@Sendable () -> Void)?
+
+    /// Bytes the lens found that regenerate on their own (nil before the first report).
+    public var clearable: UInt64? { lens?.total(.regenerates) }
 
     public var hasJournal: Bool { EventWatcher.journalUUID(device: volume.device) != nil }
 
-    public init(volume: VolumeInfo, store: URL, coolDown: Duration = .seconds(300)) {
+    public init(volume: VolumeInfo, store: URL, coolDown: Duration = .seconds(300), exclusions: Set<String> = [],
+                fullDiskAccess: @escaping @Sendable () -> Bool = { true }) {
+        self.fullDiskAccess = fullDiskAccess
+        self.exclusions = ExclusionPaths.normalized(exclusions)
         self.volume = volume
         self.store = store
         self.coolDown = coolDown
@@ -56,14 +101,14 @@ public final class DriveController: ObservableObject {
         FileManager.default.fileExists(atPath: store.appending(path: "index.snapshot").path)
     }
 
-    private func run(_ body: @escaping @MainActor () async -> Void) async {
+    private func run<R: Sendable>(_ body: @escaping @MainActor () async -> R) async -> R {
         let previous = lifecycle
         let task = Task { @MainActor in
             await previous?.value
-            await body()
+            return await body()
         }
-        lifecycle = task
-        await task.value
+        lifecycle = Task { _ = await task.value }
+        return await task.value
     }
 
     public func warm() async {
@@ -72,6 +117,24 @@ public final class DriveController: ObservableObject {
 
     public func cool() async {
         await run { await self.coolBody() }
+    }
+
+    /// Leaves these folders out of the index (relative paths). A cold drive picks them up on its next open;
+    /// an open one relists their parents, then recounts at once.
+    public func setExclusions(_ paths: Set<String>) async {
+        let paths = ExclusionPaths.normalized(paths)
+        await run {
+            guard paths != self.exclusions else { return }
+            self.exclusions = paths
+            guard !self.unmounting, let index = self.index else { return }
+            do { try await index.setExclusions(paths) } catch {
+                Self.log.error("exclusions change failed: \(error.localizedDescription)")
+                return
+            }
+            await self.refresh()
+            guard !self.unmounting else { return }
+            await self.refreshLens(force: true)
+        }
     }
 
     public func recordDailyHistoryIfNeeded() async {
@@ -90,8 +153,11 @@ public final class DriveController: ObservableObject {
     /// do nothing.
     public func willUnmount() async {
         unmounting = true
+        stopFlag.withLock { $0 = true }
         activity = .offline
         opening?.cancel()
+        retrying?.cancel()
+        lensTask?.cancel()
         await run { await self.coolBody() }
     }
 
@@ -112,7 +178,10 @@ public final class DriveController: ObservableObject {
     private func warmBody() async {
         guard !unmounting else { return }
         if index == nil {
-            let live = LiveIndex(volumeRoot: volume.url, store: store)
+            // Without Full Disk Access, privacy-protected folders are marked unreadable unopened; the retry below relists them.
+            let live = LiveIndex(volumeRoot: volume.url, store: store, exclusions: exclusions,
+                                 protectedData: ProtectedData(home: NSHomeDirectory(), ownBundleID: AppIdentity.bundleID),
+                                 fullDiskAccess: fullDiskAccess)
             // Without a snapshot or a journal, open() will do a full scan.
             activity = (snapshotExists && hasJournal) ? .opening : .scanning
             // Held so willUnmount() can cancel it (nothing suspends between the
@@ -123,9 +192,19 @@ public final class DriveController: ObservableObject {
                 _ = try await task.value
                 opening = nil
                 index = live
+                // Folders that were unreadable may be readable now. The probe runs off the main actor.
+                let probe = fullDiskAccess
+                if await Task.detached(operation: { probe() }).value, !unmounting {
+                    // Held so willUnmount() can cancel it (nothing suspends between the check and this assignment).
+                    let hook = beforeRetryScan
+                    let retry = Task { _ = try? await live.retryUnreadable(beforeScan: hook) }
+                    retrying = retry
+                    await retry.value
+                    retrying = nil
+                }
                 let updates = await live.updates()
                 watching = Task { [weak self] in
-                    for await _ in updates { self?.generation += 1 }
+                    for await change in updates { self?.receive(change) }
                 }
             } catch {
                 opening = nil
@@ -139,9 +218,160 @@ public final class DriveController: ObservableObject {
         guard !unmounting else { return }
         activity = .ready
         restartTimer()
+        // Its own task, so the walk never delays `.ready` or the first map build. One at a time: a walk still running
+        // finishes, and the next warm walks again if the index has moved on.
+        if lensTask == nil {
+            lensTaskID += 1
+            let id = lensTaskID
+            lensTask = Task {
+                await self.refreshLens()
+                if self.lensTaskID == id { self.lensTask = nil }
+            }
+        }
+    }
+
+    /// One update of the open index.
+    func receive(_ change: IndexChange) {
+        if changeObservers > 0 { pendingChange = pendingChange.map { $0.merged(with: change) } ?? change }
+        lastChange = change
+        generation += 1
+    }
+
+    /// A map window starts reading `takeChange()`. Pair with `endObservingChanges()`.
+    public func beginObservingChanges() {
+        changeObservers += 1
+    }
+
+    /// The last observer gone: what is pending is dropped and nothing more is kept.
+    public func endObservingChanges() {
+        changeObservers = max(changeObservers - 1, 0)
+        if changeObservers == 0 { pendingChange = nil }
+    }
+
+    /// Everything the index changed since the last call, merged into one change, or nil when nothing did. Clears it.
+    public func takeChange() -> IndexChange? {
+        defer { pendingChange = nil }
+        return pendingChange
+    }
+
+    /// What the open index's applies have done since it opened; nil while the drive is cold.
+    public func applyStats() async -> ApplyStats? {
+        guard let index else { return nil }
+        return await index.stats()
+    }
+
+    /// Tests only: waits for the lens walk started by the last warm.
+    func lensSettled() async { await lensTask?.value }
+
+    private func refreshLens(force: Bool = false) async {
+        guard let index, force || lens?.generation != generation else { return }
+        let gen = generation
+        lensWalks += 1
+        lensRequests += 1
+        let request = lensRequests
+        let removalMark = lensRemovals.count
+        let start = ContinuousClock.now
+        // One uncapped walk: the shown report is its large hits, the protected set all its app-managed ones. In chunks,
+        // each under the index lock and none holding it long, so applies, map builds, a trash and a close go between.
+        var walk = LensWalk(rules: .bundled, generation: gen, minBytes: 0, limit: .max)
+        var chunks = 0
+        while !walk.isFinished {
+            // Cancelled by a cool or an unmount, or the index closed: the last report stays.
+            guard !Task.isCancelled, !unmounting, self.index === index else { return }
+            let current = walk
+            let chunk = Self.lensChunk
+            guard let next = try? await index.read({ idx -> LensWalk in
+                var w = current
+                w.advance(index: idx, folders: chunk)
+                return w
+            }) else { return }
+            walk = next
+            chunks += 1
+        }
+        await beforeLensPublish?()
+        var all = walk.report()
+        // A cool cleared the removals (and cancelled this walk): nothing to publish.
+        guard !Task.isCancelled, removalMark <= lensRemovals.count else { return }
+        for bytes in lensRemovals[removalMark...] { all = all.removing(bytes) }
+        let report = LensReport(hits: Array(all.hits.lazy.filter { $0.size >= Self.lensMinBytes }.prefix(Self.lensLimit)),
+                                generation: gen)
+        let ms = (ContinuousClock.now - start) / .milliseconds(1)
+        Self.log.info("lens report: \(report.hits.count) hits in \(Int(ms)) ms (\(walk.foldersVisited) folders, \(chunks) chunks)")
+        guard request > lensApplied else { return }
+        lensApplied = request
+        lens = report
+        protectedHits = all.hits.filter { $0.safety == .appManaged }
+    }
+
+    /// Folders one locked section of the lens walk visits: a few milliseconds each in a release build.
+    static let lensChunk = 20_000
+
+    /// What the shown report keeps (LensMatcher's defaults).
+    private static let lensMinBytes: UInt64 = 1_000_000
+    private static let lensLimit = 2_000
+
+    /// Moves `items` (the ones checked in the review sheet) to the Trash, then relists their folders and recounts at once.
+    /// Runs on the lifecycle chain, so it never races a cool or an unmount; a drive that is unmounting or cold moves nothing.
+    public func trash(_ items: [BasketItem], backend: some TrashBackend) async -> TrashOutcome {
+        await run { await self.trashBody(items, backend: backend) }
+    }
+
+    private func trashBody(_ items: [BasketItem], backend: some TrashBackend) async -> TrashOutcome {
+        // No walk first: the last walk's app-managed hits are enough, because the Trasher refuses app-managed locations,
+        // and every folder that could hold one, from the rules alone.
+        let protected = protectedHits
+        lastProtected = protected
+        guard !unmounting, let index else { return .driveGone(items, protected: protected) }
+        // The realpath'd root the index was opened with (C7).
+        guard let root = try? await index.read({ $0.rootPath }) else { return .driveGone(items, protected: protected) }
+        let outcome = await Trasher.moveToTrash(items, root: root, protected: protected, expectedDevice: volume.device,
+                                                shouldStop: { [stopFlag] in stopFlag.withLock { $0 } },
+                                                backend: backend)
+        removeFromLens(outcome.cleared, items: items)
+        // An unmount that began during the moves: the index is about to close, so skip the relist, recount and lens walk
+        // (the journal brings the changes in on the next mount) and let the eject go ahead.
+        guard !unmounting, !outcome.cleared.isEmpty else { return outcome }
+        var userTrash: String?
+        if volume.isInternalData {
+            // On the Data volume the items land in the user's Trash; relist it too when it is indexed (C8).
+            let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
+            let trash = String(TrashPath.trimmed(home).drop { $0 == "/" }) + "/.Trash"
+            if (try? await index.read({ $0.folder(atRelativePath: trash) })) != nil { userTrash = trash }
+        }
+        let changes = Self.foldersToRelist(cleared: outcome.cleared, userTrash: userTrash).map {
+            FSChange(path: $0.isEmpty ? root : TrashPath.physicalPath(root: root, relative: $0), id: 0,
+                     rescanSubtree: false, historyLost: false)
+        }
+        try? await index.apply(changes)
+        guard !unmounting else { return outcome }
+        await refresh()
+        return outcome
+    }
+
+    /// The moved items leave the lens report and the protected set, with their bytes, in memory: no walk. The report
+    /// keeps its generation, so the next warm sees the index has moved on and walks again.
+    private func removeFromLens(_ cleared: Set<String>, items: [BasketItem]) {
+        guard !cleared.isEmpty else { return }
+        var bytes: [String: UInt64] = [:]
+        for item in items where cleared.contains(item.path) { bytes[item.path] = item.size }
+        for path in cleared where bytes[path] == nil { bytes[path] = 0 }
+        lensRemovals.append(bytes)
+        lens = lens?.removing(bytes)
+        protectedHits = LensReport.removing(bytes, from: protectedHits)
+    }
+
+    /// Each distinct parent of the cleared paths ("" for the root), then `userTrash` when given, sorted.
+    nonisolated static func foldersToRelist(cleared: Set<String>, userTrash: String?) -> [String] {
+        guard !cleared.isEmpty else { return [] }
+        var folders = Set(cleared.map { path in path.lastIndex(of: "/").map { String(path[..<$0]) } ?? "" })
+        if let userTrash { folders.insert(userTrash) }
+        return folders.sorted()
     }
 
     private func coolBody() async {
+        // A walk in progress stops at its next chunk; the last report stays.
+        lensTask?.cancel(); lensTask = nil
+        lensRemovals = []
         timer?.cancel(); timer = nil
         timerID += 1
         watching?.cancel(); watching = nil

@@ -3,13 +3,17 @@ import Foundation
 import Testing
 @testable import DiskApp
 
-@Test func knownItemsExplainThemselves() {
-    #expect(KnownItems.explanation(for: "Users/u/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw")
+@Test func hoverExplanationsComeFromTheRules() {
+    let rules = LensRules.bundled
+    #expect(rules.explanation(for: "Users/u/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw")
         == "The virtual disk Docker runs on. It grows but never shrinks by itself. Reclaim space in Docker \u{203A} Settings \u{203A} Resources.")
-    #expect(KnownItems.explanation(for: "Users/u/Library/Developer/Xcode/DerivedData") == "Xcode build products. Safe to clear. Rebuilds itself.")
-    #expect(KnownItems.explanation(for: "Users/u/code/site/node_modules") == "Packages for a JavaScript project. Safe to clear. Reinstall them with npm install.")
-    #expect(KnownItems.explanation(for: "Users/u/Pictures/Photos Library.photoslibrary") == "Your Photos library. Shrink it from inside Photos, not here.")
-    #expect(KnownItems.explanation(for: "Users/u/Documents") == nil)
+    #expect(rules.explanation(for: "Users/u/Library/Developer/Xcode/DerivedData") == "Xcode build products. Safe to clear. Rebuilds itself.")
+    #expect(rules.explanation(for: "Users/u/code/site/node_modules") == "Packages for a JavaScript project. Safe to clear. Reinstall them with npm install.")
+    #expect(rules.explanation(for: "Users/u/Pictures/Photos Library.photoslibrary") == "Your Photos library. Shrink it from inside Photos, not here.")
+    #expect(rules.explanation(for: "Users/u/Library/Caches") == "App caches. Safe to clear. Apps rebuild what they need.")
+    #expect(rules.explanation(for: "Users/u/Library/Caches/Yarn/v6") == "Yarn's download cache. Safe to clear. Yarn fetches what it needs again.")
+    #expect(rules.explanation(for: "Users/u/Downloads/Old.dmg") == nil)
+    #expect(rules.explanation(for: "Users/u/Documents") == nil)
 }
 
 @Test func hoverCards() {
@@ -79,4 +83,17 @@ import Testing
     #expect(MapKey.command(keyCode: 40, characters: "K", modifiers: .command, searchFocused: false) == .openCommands)
     #expect(MapKey.command(keyCode: 40, characters: "k", modifiers: [.command, .shift], searchFocused: false) == nil)
     #expect(MapKey.command(keyCode: 40, characters: "k", modifiers: [], searchFocused: false) == nil)
+}
+
+@Test func deleteAddsToBasketUnlessTyping() {
+    #expect(MapKey.command(keyCode: 51, modifiers: [], searchFocused: false) == .addToBasket)
+    #expect(MapKey.command(keyCode: 51, modifiers: [], searchFocused: true) == nil)
+    #expect(MapKey.command(keyCode: 51, modifiers: .command, searchFocused: false) == nil)
+}
+
+@Test func commandBarOffersAddToBasket() {
+    let add = CommandItem(title: "Add to Basket", shortcut: "⌫", action: .addToBasket)
+    #expect(MapCommands.items(query: "", hasSelection: true, canZoomOut: false, children: [], canAddToBasket: true).first == add)
+    #expect(MapCommands.items(query: "bask", hasSelection: true, canZoomOut: false, children: [], canAddToBasket: true) == [add])
+    #expect(!MapCommands.items(query: "", hasSelection: true, canZoomOut: false, children: []).contains(add))
 }

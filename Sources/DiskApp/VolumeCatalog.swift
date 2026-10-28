@@ -6,13 +6,21 @@ public struct VolumeInfo: Sendable, Equatable {
     public let name: String
     public let isInternalData: Bool
     public let device: dev_t
+    /// A mounted disk image (a sparse bundle, a dev image): shown while mounted, never remembered or given a lasting store.
+    public let isDiskImage: Bool
 
-    public init(url: URL, uuid: String, name: String, isInternalData: Bool, device: dev_t) {
+    public init(url: URL, uuid: String, name: String, isInternalData: Bool, device: dev_t, isDiskImage: Bool = false) {
         self.url = url
         self.uuid = uuid
         self.name = name
         self.isInternalData = isInternalData
         self.device = device
+        self.isDiskImage = isDiskImage
+    }
+
+    /// The same volume, marked as a disk image or not.
+    public func markingDiskImage(_ isDiskImage: Bool) -> VolumeInfo {
+        VolumeInfo(url: url, uuid: uuid, name: name, isInternalData: isInternalData, device: device, isDiskImage: isDiskImage)
     }
 }
 

@@ -30,6 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var ejecting: Set<String> = []
     private var internalUUID: String?
     private var selected = ""
+    /// What the last probe said; re-probed off main whenever the panel opens.
+    private var fdaStatus: FDAStatus = .unknown
+    private var accessExplainer: AccessExplainer?
     private var observing: AnyCancellable?
     private weak var observedController: DriveController?
 
@@ -40,12 +43,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastDismiss = Date.distantPast
     private var clickMonitor: Any?
     private var mapWindow: MapWindowController?
+    private let settingsStore = SettingsStore()
+    private let settingsDrives = SettingsDrives()
+    private var settingsWindow: SettingsWindowController?
+    private var settingsSubscription: AnyCancellable?
+    private var appliedSettings: AppSettings?
+    /// One basket per mounted drive, by volume UUID; dropped when the drive is really gone (C20).
+    private let baskets = BasketStore()
     /// Last saved summaries of drives that are not connected, read once per uuid and period.
     private var cachedSummaries: [String: [Int: DriveSummary?]] = [:]
     #if DEBUG
     private var debugSnapshotDir: URL?
     #endif
     private let mapLog = Logger(subsystem: AppIdentity.bundleID, category: "map")
+    /// Holds a Finder eject (at most 2 s) while the drive's index closes; fed by every external controller's activity.
+    private var unmountGate: UnmountGate?
+    private var unmountApprover: UnmountApprover?
+    /// By uuid, each with the controller it watches (held, so a replacement at a reused address still gets its own sink).
+    private var activitySinks: [String: (controller: DriveController, sink: AnyCancellable)] = [:]
+    /// Drives whose eject was refused and whose spent controller was replaced: the map window may reattach to them.
+    private var refusedEjects: Set<String> = []
+    /// Whether each external volume is a disk image, by uuid, as `DiskImageProbe` answered off main. A volume is shown
+    /// once it has an answer.
+    private var diskImages: [String: Bool] = [:]
+    private var probingDiskImages: Set<String> = []
+    /// Disk images get their index here, in the temporary folder, deleted when they unmount (never Application Support).
+    private let imageStoreBase = FileManager.default.temporaryDirectory.appending(path: AppIdentity.bundleID + ".images")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -65,10 +88,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             storeBase = try AppIdentity.storeBase()
             registry = DriveRegistry(file: storeBase.appending(path: "drives.json"))
+            // Disk-image indexes left by a crash: the images are probed and scanned afresh when they mount.
+            try? FileManager.default.removeItem(at: imageStoreBase)
             syncVolumes()
         } catch {
             NSLog("Diskinventory: cannot open store: \(error)")
         }
+        // Emits the current value first (a no-op after the controllers were created with it), then every change.
+        settingsSubscription = settingsStore.$settings.map { $0.normalized() }.removeDuplicates()
+            .sink { [weak self] new in
+                Task { @MainActor in self?.settingsChanged(new) }
+            }
 
         labelTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
@@ -83,10 +113,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { self?.refresh() }
         }
         observeMounts()
+        startUnmountApproval()
+
+        probeFullDiskAccess(explainIfDue: true)
 
         if LoginItem.shouldRegister(bundlePath: Bundle.main.bundlePath, home: NSHomeDirectory()) {
             do {
-                try LoginItem.registerOnFirstRun(defaults: .standard) { try SMAppService.mainApp.register() }
+                try LoginItem.registerOnFirstRun(defaults: UserDefaults.standard) { try SMAppService.mainApp.register() }
             } catch {
                 // Ad-hoc signed builds may be refused; launch at login is optional.
                 NSLog("Diskinventory: could not register login item: \(error)")
@@ -112,13 +145,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--show-panel") {
             DispatchQueue.main.async { [weak self] in self?.showPanel(keepOpen: true) }
         }
+        // --show-settings [--settings-snapshot <png>]: opens Settings, and renders it to a PNG for a locked screen.
+        if CommandLine.arguments.contains("--show-settings") {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.openSettings(nil)
+                if let i = CommandLine.arguments.firstIndex(of: "--settings-snapshot"), i + 1 < CommandLine.arguments.count {
+                    let out = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                        self?.debugCapture(self?.settingsWindow?.window, to: out)
+                    }
+                }
+            }
+        }
+        // --show-access-explainer <png>: shows the explainer (without recording that it was shown) and renders it.
+        if let i = CommandLine.arguments.firstIndex(of: "--show-access-explainer"), i + 1 < CommandLine.arguments.count {
+            let out = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+            DispatchQueue.main.async { [weak self] in
+                self?.presentAccessExplainer()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.debugCapture(self?.accessExplainer?.window, to: out)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--show-map"), let id = internalUUID {
             startHeartbeat()
-            DispatchQueue.main.async { [weak self] in self?.openMap(uuid: id, focus: nil) }
+            // --map-focus <relative path>: opens the map at that item's folder with it selected.
+            let focus = CommandLine.arguments.firstIndex(of: "--map-focus")
+                .flatMap { $0 + 1 < CommandLine.arguments.count ? CommandLine.arguments[$0 + 1] : nil }
+            DispatchQueue.main.async { [weak self] in self?.openMap(uuid: id, focus: focus) }
+        }
+        // --apply-stats: every 60 s, what each warm drive's index applied since the last line.
+        if CommandLine.arguments.contains("--apply-stats") {
+            startApplyStats()
         }
         // --map-snapshot <dir>: with --show-map, writes the window's PNGs once the map is drawn.
         if let i = CommandLine.arguments.firstIndex(of: "--map-snapshot"), i + 1 < CommandLine.arguments.count {
             debugSnapshotDir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+        }
+        // --debug-basket <dir> [--debug-basket-move]: drives the basket and review sheet on the throwaway DITrash image only.
+        if let i = CommandLine.arguments.firstIndex(of: "--debug-basket"), i + 1 < CommandLine.arguments.count {
+            let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+            let move = CommandLine.arguments.contains("--debug-basket-move")
+            Task { [weak self] in await self?.debugBasket(to: dir, move: move) }
+        }
+        // --debug-open-map <mount point>: opens the map of a marked, mounted disk image, for the eject-hold check.
+        if let i = CommandLine.arguments.firstIndex(of: "--debug-open-map"), i + 1 < CommandLine.arguments.count {
+            let volume = CommandLine.arguments[i + 1]
+            Task { [weak self] in await self?.debugOpenMap(volume) }
         }
         #endif
     }
@@ -131,7 +205,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             let read = await Task.detached(priority: .utility) { try? VolumeSpace.read(volume) }.value
             guard let self, let space = read, let button = self.statusItem.button else { return }
-            let label = MenuBarLabel.make(space: space, showNumber: true)
+            let settings = self.settingsStore.settings
+            let label = MenuBarLabel.make(space: space, showNumber: settings.menuBarStyle == .ringAndNumber,
+                                          lowFraction: Double(settings.lowPercent) / 100,
+                                          criticalFraction: Double(settings.criticalPercent) / 100)
             button.image = StatusIcon.image(fill: label.fillFraction, level: label.level)
             button.title = label.text.isEmpty ? "" : " " + label.text
         }
@@ -165,8 +242,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func syncVolumes() {
         guard registry != nil else { return }
         let now = Date()
-        let volumes = VolumeCatalog.current().map { v in
-            guard v.isInternalData, v.name.hasSuffix(" - Data") else { return v }
+        let volumes = VolumeCatalog.current().compactMap { v -> VolumeInfo? in
+            guard v.isInternalData else {
+                guard let image = diskImages[v.uuid] else {
+                    probeDiskImage(v)
+                    return nil
+                }
+                return v.markingDiskImage(image)
+            }
+            guard v.name.hasSuffix(" - Data") else { return v }
             return VolumeInfo(url: v.url, uuid: v.uuid, name: String(v.name.dropLast(7)),
                               isInternalData: true, device: v.device)
         }
@@ -174,14 +258,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // controller would show the mounted drive as "Not connected" for good.
         for uuid in VolumeSync.spentControllersToReplace(
             mounted: Set(volumes.map(\.uuid)), unmountFinished: unmountFinished, ejecting: ejecting, now: now) {
+            refusedEjects.insert(uuid)
             controllers[uuid] = nil
             unmounts[uuid] = nil
             unmountFinished[uuid] = nil
         }
         for v in volumes {
             var connected = false
-            if controllers[v.uuid] == nil, let store = try? LiveIndex.storeDirectory(base: storeBase, volume: v.url) {
-                controllers[v.uuid] = DriveController(volume: v, store: store)
+            if controllers[v.uuid] == nil,
+               let store = try? LiveIndex.storeDirectory(base: v.isDiskImage ? imageStoreBase : storeBase, volume: v.url) {
+                controllers[v.uuid] = DriveController(volume: v, store: store, exclusions: exclusions(for: v),
+                                                fullDiskAccess: { FullDiskAccess.status() != .denied })
                 connectedSince[v.uuid] = now
                 connected = true
             }
@@ -205,7 +292,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selected = internalUUID ?? registry.all().first?.uuid ?? ""
             observeSelected()
         }
+        watchActivity()
         rebuild()
+        // A refused eject left the drive mounted with a new controller: the map window shows it again (Decision 24).
+        if let window = mapWindow, let c = controllers[window.uuid],
+           VolumeSync.shouldReattach(windowDrive: window.uuid, holdsCurrentController: window.driveController === c,
+                                     unmounting: unmounts[window.uuid] != nil, refused: refusedEjects) {
+            refusedEjects.remove(window.uuid)
+            Task { await window.reattach(controller: c) }
+        }
+    }
+
+    /// Asks DiskArbitration, off main, whether a new volume is a disk image, then syncs again to show it.
+    private func probeDiskImage(_ v: VolumeInfo) {
+        guard probingDiskImages.insert(v.uuid).inserted else { return }
+        let url = v.url
+        Task { [weak self] in
+            let image = await Task.detached(priority: .utility) { DiskImageProbe.isDiskImage(volume: url) }.value
+            guard let self else { return }
+            self.probingDiskImages.remove(v.uuid)
+            self.diskImages[v.uuid] = image
+            self.syncVolumes()
+        }
+    }
+
+    // MARK: Unmount hold
+
+    private func startUnmountApproval() {
+        let gate = UnmountGate { [weak self] path in
+            await MainActor.run { self?.uuid(forVolumePath: path).flatMap { self?.beginUnmount($0) } }?.value
+        }
+        let approver = UnmountApprover(gate: gate, log: Logger(subsystem: AppIdentity.bundleID, category: "drives"))
+        unmountGate = gate
+        unmountApprover = approver
+        watchActivity()
+        approver.start()
+    }
+
+    /// One sink per external controller; the gate always knows which drives have an open index.
+    private func watchActivity() {
+        guard unmountGate != nil else { return }
+        activitySinks = activitySinks.filter { uuid, entry in controllers[uuid] === entry.controller }
+        for (uuid, c) in controllers where !c.volume.isInternalData && activitySinks[uuid] == nil {
+            // @Published fires on willSet; hop a turn so the read sees the new value.
+            let sink = c.$activity.receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.updateOpenDrives() }
+            activitySinks[uuid] = (c, sink)
+        }
+        updateOpenDrives()
+    }
+
+    /// Drives with an open index, and drives whose close is still running: the system's willUnmount notification comes
+    /// before the approval callback and turns the drive offline at once, but its index may not have closed yet.
+    private func updateOpenDrives() {
+        let open = controllers.filter { uuid, c in
+            !c.volume.isInternalData
+                && ([.opening, .scanning, .ready].contains(c.activity) || (unmounts[uuid] != nil && unmountFinished[uuid] == nil))
+        }.values
+        unmountGate?.setOpen(Set(open.map { $0.volume.url.resolvingSymlinksInPath().path }))
+    }
+
+    /// The external drive mounted at `path` (C14).
+    private func uuid(forVolumePath path: String) -> String? {
+        var path = path
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        return controllers.first { _, c in
+            !c.volume.isInternalData && c.volume.url.resolvingSymlinksInPath().path == real
+        }?.key
+    }
+
+    /// The skipped folders as paths relative to this volume's root.
+    private func exclusions(for volume: VolumeInfo) -> Set<String> {
+        settingsStore.settings.exclusions(under: volume.url.resolvingSymlinksInPath().path)
+    }
+
+    private func settingsChanged(_ new: AppSettings) {
+        let old = appliedSettings
+        appliedSettings = new
+        if old?.menuBarStyle != new.menuBarStyle || old?.lowPercent != new.lowPercent || old?.criticalPercent != new.criticalPercent {
+            refresh()
+        }
+        if old?.excludedFolders != new.excludedFolders {
+            for c in controllers.values {
+                let paths = new.exclusions(under: c.volume.url.resolvingSymlinksInPath().path)
+                Task { await c.setExclusions(paths) }
+            }
+        }
     }
 
     private func controller(for url: URL?) -> DriveController? {
@@ -226,6 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // willUnmount saves the index; whatever was cached before is stale.
             self.cachedSummaries[uuid] = nil
             if self.unmounts[uuid] != nil { self.unmountFinished[uuid] = Date() }
+            self.updateOpenDrives()
             self.rebuild()
         }
         unmounts[uuid] = task
@@ -245,10 +419,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             for uuid in gone {
                 await self.beginUnmount(uuid)?.value
+                if self.controllers[uuid]?.volume.isDiskImage == true {
+                    // Shown only while mounted: no "Not connected" tab and no index left behind.
+                    self.registry.dropUnmountedImage(uuid: uuid)
+                    try? FileManager.default.removeItem(at: LiveIndex.storeDirectory(base: self.imageStoreBase, uuid: uuid))
+                }
+                self.diskImages[uuid] = nil
                 self.controllers[uuid] = nil
                 self.unmounts[uuid] = nil
                 self.unmountFinished[uuid] = nil
                 self.connectedSince[uuid] = nil
+                self.baskets.drop(uuid)
+                self.refusedEjects.remove(uuid)
             }
             self.syncVolumes()
         }
@@ -271,6 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Still mounted: this controller is spent, so start a fresh one.
                 guard let self else { return }
                 self.ejecting.remove(uuid)
+                self.refusedEjects.insert(uuid)
                 self.controllers[uuid] = nil
                 self.unmounts[uuid] = nil
                 self.unmountFinished[uuid] = nil
@@ -306,10 +489,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let c, c.space == nil { Task { await c.refreshSpace() } }
         let period = c?.period ?? offlinePeriod
         let summary = c?.summary ?? (connected.contains(selected) ? nil : cachedSummary(selected, period: period))
+        settingsDrives.drives = registry.all()
         let model = DropdownModel.make(
             drives: registry.all(), selected: selected, connected: connected, summary: summary,
             space: c?.space, activity: c?.activity ?? .offline, period: period,
-            connectedSince: connectedSince[selected], now: .now)
+            connectedSince: connectedSince[selected], now: .now, clearable: c?.clearable,
+            fullDiskAccess: fdaStatus)
         if state.model != model { state.model = model }
         if state.period != period { state.period = period }
         // A new controller for the same UUID (remount, failed eject) needs a fresh subscription.
@@ -373,8 +558,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.panel?.dismiss()
                 self.openMap(uuid: self.selected, focus: focus)
-            })
+            },
+            reviewClearable: { [weak self] in
+                guard let self else { return }
+                self.reviewClearable(uuid: self.selected)
+            },
+            openSettings: { [weak self] in self?.openSettings(nil) })
         let p = DropdownPanel(rootView: host)
+        p.onOpenSettings = { [weak self] in self?.openSettings(nil) }
         p.onDismiss = { [weak self] in self?.panelDismissed() }
         return p
     }
@@ -396,6 +587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await c.warm() }
         }
         rebuild()
+        probeFullDiskAccess(explainIfDue: false)
         #if DEBUG
         let dataReady = clock.now - started
         #endif
@@ -420,6 +612,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSLog("Diskinventory panel window \(p.windowNumber) frame \(p.frame)")
         NSLog("Diskinventory showPanel main thread: sync+model \(dataReady), total \(clock.now - started)")
         #endif
+    }
+
+    /// Probes off main. A change redraws the panel; at launch a denial shows the explainer once.
+    private func probeFullDiskAccess(explainIfDue: Bool) {
+        Task { @MainActor in
+            let status = await FullDiskAccess.currentStatus()
+            if status != fdaStatus {
+                fdaStatus = status
+                rebuild()
+            }
+            #if DEBUG
+            // Debug runs with flags must not use up the one-time explainer.
+            if CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("--") }) { return }
+            #endif
+            if explainIfDue, AccessExplainer.isDue(status: status) {
+                UserDefaults.standard.set(true, forKey: AccessExplainer.defaultsKey)
+                presentAccessExplainer()
+            }
+        }
+    }
+
+    private func presentAccessExplainer() {
+        let explainer = AccessExplainer()
+        explainer.onClose = { [weak self] in self?.accessExplainer = nil }
+        accessExplainer = explainer
+        NSApp.activate(ignoringOtherApps: true)
+        explainer.showWindow(nil)
     }
 
     private func panelDismissed() {
@@ -456,6 +675,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var heartbeatLast = 0.0
     private var heartbeatLongest = 0.0
+    private var applyStatsTimer: Timer?
+    /// The stats each drive's line was last measured from, by uuid.
+    private var lastApplyStats: [String: ApplyStats] = [:]
+    private let indexLog = Logger(subsystem: AppIdentity.bundleID, category: "index")
+
+    private func startApplyStats() {
+        applyStatsTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.logApplyStats() }
+        }
+    }
+
+    private func logApplyStats() {
+        let all = controllers
+        Task { @MainActor in
+            for (uuid, c) in all.sorted(by: { $0.key < $1.key }) {
+                guard let now = await c.applyStats() else { lastApplyStats[uuid] = nil; continue }
+                // A re-opened index counts from zero again.
+                var last = lastApplyStats[uuid] ?? ApplyStats(applies: 0, foldersRelisted: 0, subtreesRescanned: 0,
+                                                              fullRescans: 0, busy: .zero)
+                if now.applies < last.applies {
+                    last = ApplyStats(applies: 0, foldersRelisted: 0, subtreesRescanned: 0, fullRescans: 0, busy: .zero)
+                }
+                lastApplyStats[uuid] = now
+                let ms = Int((now.busy - last.busy) / .milliseconds(1))
+                indexLog.info("""
+                    apply stats \(c.volume.name, privacy: .public): \(now.applies - last.applies) applies, \
+                    \(now.foldersRelisted - last.foldersRelisted) relists, \(now.subtreesRescanned - last.subtreesRescanned) subtrees, \
+                    \(now.fullRescans - last.fullRescans) full, \(ms) ms busy
+                    """)
+            }
+        }
+    }
 
     private func beat() {
         let now = CACurrentMediaTime()
@@ -463,6 +714,110 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         heartbeatLast = now
         heartbeatLongest = max(heartbeatLongest, late)
         if late > 16 { mapLog.info("main thread late \(Int(late)) ms (longest \(Int(self.heartbeatLongest)) ms)") }
+    }
+    #endif
+
+    #if DEBUG
+    /// The only volume the basket driver will touch: a disk image mounted at exactly this path, never the internal disk (C9).
+    private static let debugBasketVolume = "/Volumes/DITrash"
+
+    /// A plain file only the check script creates at the image's root.
+    private static let debugBasketMarker = ".diskinventory-test-volume"
+
+    /// True when `hdiutil info` lists a disk image mounted at exactly `mountPoint`.
+    nonisolated private static func isMountedDiskImage(at mountPoint: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        process.arguments = ["info", "-plist"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        guard (try? process.run()) != nil else { return false }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let images = info["images"] as? [[String: Any]] else { return false }
+        return images.contains { image in
+            (image["system-entities"] as? [[String: Any]] ?? []).contains { ($0["mount-point"] as? String) == mountPoint }
+        }
+    }
+
+    private func debugOpenMap(_ volume: String) async {
+        let isImage = await Task.detached { Self.isMountedDiskImage(at: volume) }.value
+        var marker = stat()
+        let hasMarker = lstat(volume + "/" + Self.debugBasketMarker, &marker) == 0 && (marker.st_mode & S_IFMT) == S_IFREG
+        guard isImage, hasMarker, let uuid = uuid(forVolumePath: volume) else {
+            mapLog.error("debug-open-map: refused, \(volume, privacy: .public) is not a marked, mounted disk image")
+            return
+        }
+        mapLog.info("debug-open-map: \(volume, privacy: .public) opened \(self.openMap(uuid: uuid, focus: "d1"))")
+    }
+
+    private func debugBasket(to dir: URL, move: Bool) async {
+        let url = URL(fileURLWithPath: Self.debugBasketVolume)
+        let values = try? url.resourceValues(forKeys: [.volumeIsInternalKey, .volumeIsEjectableKey, .volumeURLKey])
+        let volume = Self.debugBasketVolume
+        let isImage = await Task.detached { Self.isMountedDiskImage(at: volume) }.value
+        var marker = stat()
+        let hasMarker = lstat(volume + "/" + Self.debugBasketMarker, &marker) == 0 && (marker.st_mode & S_IFMT) == S_IFREG
+        guard let c = controller(for: url), !c.volume.isInternalData, c.volume.url.path == Self.debugBasketVolume,
+              values?.volume?.path == Self.debugBasketVolume, values?.volumeIsInternal != true, values?.volumeIsEjectable == true,
+              isImage, hasMarker
+        else {
+            mapLog.error("debug-basket: refused, \(Self.debugBasketVolume, privacy: .public) is not a marked, mounted disk image")
+            return
+        }
+        let uuid = c.volume.uuid
+        func settle(_ ms: Int = 1500) async { try? await Task.sleep(for: .milliseconds(ms)) }
+        selectDrive(uuid)
+        await c.warm()
+        for _ in 0..<100 where c.lens == nil { await settle(200) }
+        rebuild()
+        mapLog.info("debug-basket: review title \(self.state.model.reviewTitle ?? "none", privacy: .public), free \(self.state.model.freeTitle, privacy: .public)")
+        showPanel(keepOpen: true)
+        await settle()
+        debugCapture(panel, to: dir.appending(path: "panel.png"))
+        reviewClearable(uuid: uuid)
+        await settle(2500)
+        guard let window = mapWindow, window.uuid == uuid else { return }
+        window.debugSheetSnapshot(to: dir.appending(path: "review.png"))
+        mapLog.info("debug-basket: basket \(window.basket.items.map(\.path), privacy: .public)")
+        if move {
+            let clock = ContinuousClock()
+            let started = clock.now
+            let outcome = await window.debugMoveReviewed()
+            let ms = (clock.now - started) / .milliseconds(1)
+            mapLog.info("debug-basket: \(outcome.title, privacy: .public) / \(outcome.detail ?? "-", privacy: .public) / \(outcome.failureLines, privacy: .public) in \(Int(ms)) ms")
+            rebuild()
+            mapLog.info("debug-basket: after move free \(self.state.model.freeTitle, privacy: .public), review \(self.state.model.reviewTitle ?? "none", privacy: .public)")
+            await settle(1000)
+            debugCapture(panel, to: dir.appending(path: "panel-after.png"))
+            // A symlink item goes to the Trash as the link; its target stays (fixture made by the check script).
+            let link = BasketItem(path: "Users/u/linkcheck/link", name: "link", size: 0, kind: .other, isFolder: false,
+                                  ruleID: nil, safety: nil)
+            let linkOutcome = await c.trash([link], backend: SystemTrash())
+            mapLog.info("debug-basket: symlink moved \(linkOutcome.moved, privacy: .public) failures \(linkOutcome.failureLines, privacy: .public)")
+
+            // While a sheet is moving, its window is neither replaced nor reset.
+            window.debugSetPhase(.moving)
+            let opened = openMap(uuid: internalUUID ?? "", focus: nil)
+            reviewClearable(uuid: uuid)
+            mapLog.info("debug-basket: while moving: other drive's map opened \(opened), window kept \(self.mapWindow === window), sheet \(String(describing: window.debugReview), privacy: .public)")
+            // A finished sheet goes back to its list on the next review.
+            window.debugSetPhase(.done(outcome))
+            reviewClearable(uuid: uuid)
+            mapLog.info("debug-basket: review after done: sheet \(String(describing: window.debugReview), privacy: .public)")
+        }
+        window.debugCloseReview()
+        await settle()
+        await window.debugBasketDrive(to: dir)
+        mapLog.info("debug-basket: done")
+    }
+
+    private func debugCapture(_ window: NSWindow?, to url: URL) {
+        guard let content = window?.contentView, let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { return }
+        content.cacheDisplay(in: content.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
     }
     #endif
 
@@ -497,15 +852,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = bar
     }
 
+    // MARK: Settings window
+
+    @objc func openSettings(_ sender: Any?) {
+        panel?.dismiss()
+        if settingsWindow == nil {
+            let window = SettingsWindowController(store: settingsStore, drives: settingsDrives,
+                                                  setTint: { [weak self] uuid, index in self?.setTint(uuid: uuid, index: index) })
+            window.onClose = { [weak self] in
+                // The window object stays; the Dock icon goes unless the map window is open.
+                self?.settingsOpen = false
+                self?.updateActivationPolicy()
+            }
+            settingsWindow = window
+        }
+        settingsOpen = true
+        updateActivationPolicy()
+        NSApp.activate()
+        settingsWindow?.showWindow(nil)
+        settingsWindow?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private var settingsOpen = false
+
+    /// Regular (Dock icon, menu bar) while the map or Settings window is open, else accessory.
+    private func updateActivationPolicy() {
+        NSApp.setActivationPolicy(mapWindow != nil || settingsOpen ? .regular : .accessory)
+    }
+
+    private func setTint(uuid: String, index: Int) {
+        guard registry != nil, (try? registry.setTint(uuid: uuid, index: index)) != nil else { return }
+        rebuild()
+        if let window = mapWindow, window.uuid == uuid { window.setTint(index: index) }
+    }
+
     // MARK: Map window
 
     /// Opens the map for drive `uuid`: at the root when `focus` is nil or empty, else at
     /// `focus`'s parent with `focus` selected. One map window at a time.
-    func openMap(uuid: String, focus: String?) {
+    /// False when nothing opened: the drive is gone, or another drive's window is moving items to the Trash.
+    @discardableResult
+    func openMap(uuid: String, focus: String?) -> Bool {
         let clock = ContinuousClock()
         let started = clock.now
         guard let controller = controllers[uuid], unmounts[uuid] == nil,
-              let drive = registry?.all().first(where: { $0.uuid == uuid }) else { return }
+              let drive = registry?.all().first(where: { $0.uuid == uuid }) else { return false }
         var path = "", select: String?
         if let focus, !focus.isEmpty {
             path = focus.lastIndex(of: "/").map { String(focus[..<$0]) } ?? ""
@@ -515,16 +906,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.show(path: path, select: select)
         } else {
             if let old = mapWindow {
+                // A move to the Trash in progress keeps its window and sheet: refuse, and show it.
+                guard !old.isMovingToTrash else {
+                    NSSound.beep()
+                    NSApp.activate()
+                    old.window?.makeKeyAndOrderFront(nil)
+                    return false
+                }
+                old.endReview()
                 mapWindow = nil
                 old.close()
             }
-            let window = MapWindowController(controller: controller, drive: drive, path: path, select: select)
+            let window = MapWindowController(controller: controller, drive: drive, path: path, select: select,
+                                             basket: baskets.basket(for: uuid))
             window.onClose = { [weak self, weak window] in
                 guard let self, self.mapWindow === window else { return }
                 self.mapWindow = nil
-                // The Dock icon shows only while the window is open (spec 5).
-                NSApp.setActivationPolicy(.accessory)
+                // The Dock icon shows only while a window is open (spec 5).
+                self.updateActivationPolicy()
             }
+            window.onBecameKey = { [weak self] in self?.syncVolumes() }
             window.onFirstFrame = { [weak self] in
                 let ms = (clock.now - started) / .milliseconds(1)
                 self?.mapLog.info("first map frame in \(Int(ms)) ms")
@@ -536,7 +937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             mapWindow = window
         }
-        NSApp.setActivationPolicy(.regular)
+        updateActivationPolicy()
         NSApp.activate()
         mapWindow?.showWindow(nil)
         mapWindow?.window?.makeKeyAndOrderFront(nil)
@@ -545,6 +946,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         if let w = mapWindow?.window { NSLog("Diskinventory map window \(w.windowNumber) frame \(w.frame)") }
         #endif
+        return true
+    }
+
+    /// "Review N GB to clear": puts the drive's regenerating hits in its basket, opens the map at the root and shows
+    /// the review sheet. Nothing moves until the user presses "Move N items to Trash" there.
+    func reviewClearable(uuid: String) {
+        panel?.dismiss()
+        guard let c = controllers[uuid], unmounts[uuid] == nil, openMap(uuid: uuid, focus: nil),
+              let window = mapWindow, window.uuid == uuid, window.driveController === c else { return }
+        // A sheet that is moving keeps its list; the hits wait for the next review.
+        guard !window.isMovingToTrash else { NSSound.beep(); return }
+        let hits = c.lens?.hits.filter { $0.safety == .regenerates } ?? []
+        baskets.basket(for: uuid).add(contentsOf: hits.map(BasketItem.from(hit:)))
+        window.presentReview()
     }
 
     // MARK: Quit
@@ -557,16 +972,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminating else { return .terminateLater }
         terminating = true
-        let all = Array(controllers.values)
+        unmountApprover?.stop()
         Task { [weak self] in
+            // A move to the Trash in progress finishes first (at most 30 s): stopping it between items would leave some
+            // moved and some not, with no outcome shown.
+            _ = await QuitWait.whileBusy { self?.mapWindow?.isMovingToTrash == true }
+            guard let self else { return }
+            let all = Array(self.controllers.values)
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                self?.finishTermination()
+            }
             await withTaskGroup(of: Void.self) { group in
                 for c in all { group.addTask { await c.cool() } }
             }
-            self?.finishTermination()
-        }
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
-            self?.finishTermination()
+            self.finishTermination()
         }
         return .terminateLater
     }

@@ -63,6 +63,7 @@ extension ScanIndex {
         result.lastEventID = lastEventID
         result.fseventsUUID = fseventsUUID
         result.scannedAt = scannedAt
+        result.exclusions = exclusions
         return result
     }
 }

@@ -7,7 +7,8 @@ public func shouldDescend(entryDevice: Int32, rootDevice: Int32, isMountPoint: B
 }
 
 /// All scan results. Folders live in RAM; stored files live in `files` on disk.
-/// Only one caller may mutate it at a time (the scanner's collector loop).
+/// Not thread-safe, lookups included: `folder(atRelativePath:)` and `deepestFolder` keep tables of big folders'
+/// children. Every access stays with its one owner at a time (the `LiveIndex` actor, or the scanner's collector loop).
 public final class ScanIndex {
     public static let bigFileThreshold: UInt64 = 1_048_576
 
@@ -27,6 +28,36 @@ public final class ScanIndex {
     public var lastEventID: UInt64 = 0
     /// The volume's FSEvents journal UUID when this index was last current.
     public var fseventsUUID: String?
+    /// Folders (paths relative to the root, no leading or trailing "/") that listings leave out.
+    /// Not stored in the snapshot; the owner sets it after loading.
+    public var exclusions: Set<String> = [] {
+        didSet {
+            var map: [String: Set<String>] = [:]
+            for path in exclusions {
+                guard let slash = path.lastIndex(of: "/") else { map["", default: []].insert(path); continue }
+                map[String(path[..<slash]), default: []].insert(String(path[path.index(after: slash)...]))
+            }
+            excludedChildren = map
+        }
+    }
+    /// `exclusions` as parent relative path -> excluded child names.
+    private var excludedChildren: [String: Set<String>] = [:]
+    /// Big folders' subfolders by their names' bytes, built when an ASCII lookup passes more than `tableAbove` of them
+    /// and dropped whenever the folder's children change, so a temp folder with 20,000 entries isn't passed over for
+    /// every event under it. At most `tableLimit` names in all; past that the oldest table goes.
+    private var childTables: [FolderID: (names: [[UInt8]: FolderID], built: Int)] = [:]
+    private var tabledNames = 0
+    private var tablesBuilt = 0
+    /// Folders with more than `tableLimit` subfolders: never tabled, and not counted again until their children change.
+    private var untableable: Set<FolderID> = []
+    var tableAbove = 1024
+    var tableLimit = 65_536
+    /// Tests only: passes made over a folder's subfolders to table them.
+    private(set) var childTablePasses = 0
+    /// Tests only.
+    var childLookupTables: Int { childTables.count }
+    /// Folders marked `.stale` since the owner last took them, to list again later.
+    public var newlyStale: [FolderID] = []
     public internal(set) var garbageFolders = 0
     public internal(set) var garbageFiles = 0
     public var scannedAt = Date()
@@ -64,29 +95,38 @@ public final class ScanIndex {
         case .vanished:
             folders[id].flags.insert(.vanished)
             return []
+        case .timedOut:
+            markStale(listing.folder)
+            return []
         case .ok:
             break
         }
 
         if listing.partial { folders[id].flags.insert(.partial) }
 
+        var children: [FolderID] = []
         var newFolders: [FolderID] = []
         var direct: UInt64 = 0
         var pass: Set<UInt64> = []
         folders[id].firstFile = FileIndex(files.count)
+        let skipped = excludedNames(in: listing.folder)
 
         for entry in listing.entries {
             if entry.kind == .directory {
+                if skipped?.contains(entry.name) == true { continue }
                 guard shouldDescend(entryDevice: entry.device, rootDevice: rootDevice, isMountPoint: entry.isMountPoint) else { continue }
                 // Directory hard links (HFS+ Time Machine backups): walk each once.
                 if entry.linkCount > 1, !claimHardLink(entry.inode, for: listing.folder, pass: &pass) { continue }
-                newFolders.append(FolderID(folders.count))
+                let new = FolderID(folders.count)
                 folders.append(FolderRecord(parent: listing.folder, nameOffset: folderNames.append(entry.name)))
+                children.append(new)
+                // A dataless folder stays unlisted: opening it could download it.
+                if entry.flags.contains(.dataless) { folders[Int(new)].flags.insert(.dataless) } else { newFolders.append(new) }
                 continue
             }
             direct += try addFile(entry, to: listing.folder, pass: &pass)
         }
-        link(newFolders, under: listing.folder)
+        link(children, under: listing.folder)
         addToTotals(from: listing.folder, Int64(bitPattern: direct))
         return newFolders
     }
@@ -94,14 +134,28 @@ public final class ScanIndex {
     /// Re-reads one already-listed folder's direct contents. Subfolders that are still
     /// there keep their IDs and subtrees; new ones are returned for scanning; gone ones
     /// become garbage. Totals of this folder and every ancestor are corrected.
-    public func relist(_ listing: DirectoryListing) throws -> [FolderID] {
+    /// What a relist found: the new subfolders still to scan, and whether the folder's blocks (subfolders and stored
+    /// files) changed by name.
+    public struct RelistResult: Sendable {
+        public var newFolders: [FolderID]
+        public var namesChanged: Bool
+    }
+
+    public func relist(_ listing: DirectoryListing) throws -> RelistResult {
         let folder = listing.folder
         let id = Int(folder)
+        // Not read: everything it had stays, sizes included.
+        guard listing.outcome != .timedOut else {
+            markStale(folder)
+            return RelistResult(newFolders: [], namesChanged: false)
+        }
         let old = folders[id]
 
         var oldDirect = old.smallAllocated
+        var oldBigNames: [String] = []
         for file in old.firstFile..<(old.firstFile + old.bigFileCount) {
             oldDirect += try files.record(file).allocated
+            oldBigNames.append(try files.name(file))
         }
         var oldChildren: [String: FolderID] = [:]
         var child = old.firstChildFolder
@@ -115,34 +169,53 @@ public final class ScanIndex {
         folders[id].bigFileCount = 0
         folders[id].smallFileCount = 0
         folders[id].smallAllocated = 0
-        folders[id].flags.remove([.unreadable, .vanished, .partial])
+        folders[id].flags.remove([.unreadable, .vanished, .partial, .stale, .dataless])
         switch listing.outcome {
         case .unreadable: folders[id].flags.insert(.unreadable)
         case .vanished: folders[id].flags.insert(.vanished)
         case .ok: if listing.partial { folders[id].flags.insert(.partial) }
+        case .timedOut: break
         }
 
         var children: [FolderID] = []
         var newFolders: [FolderID] = []
         var newDirect: UInt64 = 0
+        var newBigNames: [String] = []
+        var reshaped = false
         var pass: Set<UInt64> = []
+        let skipped = excludedNames(in: folder)
         for entry in listing.outcome == .ok ? listing.entries : [] {
             if entry.kind == .directory {
+                if skipped?.contains(entry.name) == true { continue }
                 guard shouldDescend(entryDevice: entry.device, rootDevice: rootDevice, isMountPoint: entry.isMountPoint) else { continue }
                 if let kept = oldChildren.removeValue(forKey: entry.name) {
                     children.append(kept)
+                    let wasDataless = folders[Int(kept)].flags.contains(.dataless)
+                    if wasDataless != entry.flags.contains(.dataless) {
+                        // Downloaded since: list it now. Evicted: what it held is no longer on this Mac.
+                        resetContents(of: kept)
+                        if wasDataless { newFolders.append(kept) } else { folders[Int(kept)].flags.insert(.dataless) }
+                        reshaped = true
+                    }
                     continue
                 }
                 if entry.linkCount > 1, !claimHardLink(entry.inode, for: folder, pass: &pass) { continue }
                 let new = FolderID(folders.count)
                 folders.append(FolderRecord(parent: folder, nameOffset: folderNames.append(entry.name)))
                 children.append(new)
-                newFolders.append(new)
+                reshaped = true
+                if entry.flags.contains(.dataless) { folders[Int(new)].flags.insert(.dataless) } else { newFolders.append(new) }
                 continue
             }
+            let stored = folders[id].bigFileCount
             newDirect += try addFile(entry, to: folder, pass: &pass)
+            if folders[id].bigFileCount != stored { newBigNames.append(entry.name) }
         }
         link(children, under: folder)
+        // Kept subfolders were removed from oldChildren, so any left there are gone. Stored files usually list in the
+        // same order; only when they don't are they compared as sets.
+        let namesChanged = !oldChildren.isEmpty || reshaped
+            || (newBigNames != oldBigNames && Set(newBigNames) != Set(oldBigNames))
 
         var removedTotal: UInt64 = 0
         for gone in oldChildren.values {
@@ -151,7 +224,13 @@ public final class ScanIndex {
         }
         let delta = Int64(bitPattern: newDirect) - Int64(bitPattern: oldDirect) - Int64(bitPattern: removedTotal)
         addToTotals(from: folder, delta)
-        return newFolders
+        return RelistResult(newFolders: newFolders, namesChanged: namesChanged)
+    }
+
+    /// Marks a folder whose listing hung or was skipped; it keeps what it had.
+    func markStale(_ folder: FolderID) {
+        folders[Int(folder)].flags.insert(.stale)
+        newlyStale.append(folder)
     }
 
     /// Empties a folder so `integrate` can list it from scratch: its total leaves its
@@ -168,6 +247,7 @@ public final class ScanIndex {
             child = next
         }
         garbageFiles += Int(folders[id].bigFileCount)
+        untable(folder)
         let keep = folders[id].flags.intersection(.garbage)
         folders[id] = FolderRecord(parent: folders[id].parent, nameOffset: folders[id].nameOffset)
         folders[id].flags = keep
@@ -175,19 +255,101 @@ public final class ScanIndex {
 
     /// The folder at a path relative to `rootPath` ("" is the root), or nil.
     public func folder(atRelativePath path: String) -> FolderID? {
+        let found = deepestFolder(onRelativePath: path)
+        return found.whole ? found.folder : nil
+    }
+
+    /// The deepest folder in the index on the way to a path relative to `rootPath` ("" is the root), found in one walk
+    /// down, and whether it is the whole path.
+    public func deepestFolder(onRelativePath path: String) -> (folder: FolderID, whole: Bool) {
         var current: FolderID = 0
         for part in path.split(separator: "/", omittingEmptySubsequences: true) {
-            var child = folders[Int(current)].firstChildFolder
-            while child != noFolder, folderName(child) != part {
-                child = folders[Int(child)].nextSibling
-            }
-            guard child != noFolder else { return nil }
+            guard let child = child(named: part, of: current) else { return (current, false) }
             current = child
         }
-        return current
+        return (current, true)
+    }
+
+    /// `folder`'s subfolder named `name`, or nil. An ASCII name is matched on its bytes, in a table or read in place:
+    /// event paths and listings both carry a name's own bytes, so "K" never finds a Kelvin sign. Any other name is
+    /// compared as String comparison has it, so its NFC and NFD spellings agree; it is never tabled. Either way the
+    /// answer doesn't depend on whether the folder is tabled.
+    private func child(named name: Substring, of folder: FolderID) -> FolderID? {
+        var child = folders[Int(folder)].firstChildFolder
+        guard name.utf8.allSatisfy({ $0 < 0x80 }) else {
+            while child != noFolder, folderName(child) != name {
+                child = folders[Int(child)].nextSibling
+            }
+            return child == noFolder ? nil : child
+        }
+        let bytes = Array(name.utf8)
+        if let table = childTables[folder] { return table.names[bytes] }
+        var passed = 0
+        while child != noFolder, !folderNames.hasBytes(at: folders[Int(child)].nameOffset, bytes) {
+            child = folders[Int(child)].nextSibling
+            passed += 1
+        }
+        if passed > tableAbove, !untableable.contains(folder) { tableChildren(of: folder) }
+        return child == noFolder ? nil : child
+    }
+
+    /// After a lookup passed more than `tableAbove` of a folder's subfolders: its subfolders by name. The first of two
+    /// equal names wins, as in a pass over the siblings.
+    private func tableChildren(of folder: FolderID) {
+        childTablePasses += 1
+        // Counted first, without building a name: a folder over the limit is remembered and left untabled.
+        var count = 0
+        var child = folders[Int(folder)].firstChildFolder
+        while child != noFolder, count <= tableLimit {
+            count += 1
+            child = folders[Int(child)].nextSibling
+        }
+        guard count <= tableLimit else {
+            untableable.insert(folder)
+            return
+        }
+        while tabledNames + count > tableLimit,
+              let oldest = childTables.min(by: { $0.value.built < $1.value.built })?.key {
+            untable(oldest)
+        }
+        var names: [[UInt8]: FolderID] = [:]
+        names.reserveCapacity(count)
+        child = folders[Int(folder)].firstChildFolder
+        while child != noFolder {
+            let bytes = folderNames.bytes(at: folders[Int(child)].nameOffset)
+            if names[bytes] == nil { names[bytes] = child }
+            child = folders[Int(child)].nextSibling
+        }
+        tablesBuilt += 1
+        childTables[folder] = (names, tablesBuilt)
+        tabledNames += names.count
+    }
+
+    /// `folder`'s children changed (or it became garbage): its table, if any, goes, and it may be counted again.
+    private func untable(_ folder: FolderID) {
+        guard !childTables.isEmpty || !untableable.isEmpty else { return }
+        if let table = childTables.removeValue(forKey: folder) { tabledNames -= table.names.count }
+        untableable.remove(folder)
+    }
+
+    /// The folder's path relative to the root ("" for the root).
+    public func relativePath(of folder: FolderID) -> String {
+        var parts: [String] = []
+        var cursor = folder
+        while cursor != 0 {
+            parts.append(folderName(cursor))
+            cursor = folders[Int(cursor)].parent
+        }
+        return parts.reversed().joined(separator: "/")
     }
 
     // MARK: - Helpers
+
+    /// Names of `folder`'s excluded subfolders, nil when there are none. Pays for one
+    /// `relativePath(of:)` only when any exclusion is set.
+    private func excludedNames(in folder: FolderID) -> Set<String>? {
+        excludedChildren.isEmpty ? nil : excludedChildren[relativePath(of: folder)]
+    }
 
     /// Counts a hard link once: it belongs to the first folder that claims it. It can be
     /// claimed again once that folder is garbage, or by the same folder in a later
@@ -225,6 +387,7 @@ public final class ScanIndex {
     }
 
     private func link(_ children: [FolderID], under folder: FolderID) {
+        untable(folder)
         folders[Int(folder)].firstChildFolder = children.first ?? noFolder
         for (child, next) in zip(children, children.dropFirst() + [noFolder]) {
             folders[Int(child)].nextSibling = next
@@ -245,6 +408,7 @@ public final class ScanIndex {
         var stack = [root]
         while let folder = stack.popLast() {
             folders[Int(folder)].flags.insert(.garbage)
+            untable(folder)
             garbageFolders += 1
             garbageFiles += Int(folders[Int(folder)].bigFileCount)
             var child = folders[Int(folder)].firstChildFolder

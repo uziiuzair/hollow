@@ -1,7 +1,7 @@
 import Foundation
 
 public enum MapAction: Equatable, Sendable {
-    case revealInFinder, copyPath, zoomToParent, goTo(key: String)
+    case addToBasket, revealInFinder, copyPath, zoomToParent, goTo(key: String)
 }
 
 public struct CommandItem: Equatable, Sendable {
@@ -18,9 +18,11 @@ public struct CommandItem: Equatable, Sendable {
 
 public enum MapCommands {
     /// The caller passes `hasSelection && !isBucket`: Reveal and Copy need a real file or folder.
+    /// `canAddToBasket` is true when the selection can go in the basket (not the root, a bucket or something already in it).
     public static func items(query: String, hasSelection: Bool, canZoomOut: Bool,
-                             children: [(name: String, key: String)]) -> [CommandItem] {
+                             children: [(name: String, key: String)], canAddToBasket: Bool = false) -> [CommandItem] {
         var base: [CommandItem] = []
+        if canAddToBasket { base.append(CommandItem(title: "Add to Basket", shortcut: "⌫", action: .addToBasket)) }
         if hasSelection {
             base.append(CommandItem(title: "Reveal in Finder", shortcut: nil, action: .revealInFinder))
             base.append(CommandItem(title: "Copy Path", shortcut: nil, action: .copyPath))
@@ -49,7 +51,7 @@ public struct KeyModifiers: OptionSet, Sendable {
 }
 
 public enum MapKeyCommand: Equatable, Sendable {
-    case zoomIn, zoomOut, quickLook, openCommands, selectPrevious, selectNext
+    case zoomIn, zoomOut, quickLook, openCommands, selectPrevious, selectNext, addToBasket
     case closeSearch, runCommand, commandUp, commandDown
 }
 
@@ -69,15 +71,62 @@ public enum MapKey {
             }
         }
         // By character (the event's charactersIgnoringModifiers), so ⌘K works on any layout.
-        if modifiers == .command { return characters?.lowercased() == "k" ? .openCommands : nil }
+        if modifiers == .command {
+            // Finder's: ⌘[ and ⌘↑ go to the enclosing folder, ⌘↓ opens.
+            switch keyCode {
+            case 33, 126: return .zoomOut
+            case 125: return .zoomIn
+            default: return characters?.lowercased() == "k" ? .openCommands : nil
+            }
+        }
         guard modifiers.isEmpty else { return nil }
         switch keyCode {
         case 36: return .zoomIn
         case 53: return .zoomOut
         case 49: return .quickLook
+        case 51: return .addToBasket
         case 126: return .selectPrevious
         case 125: return .selectNext
         default: return nil
         }
+    }
+}
+
+public enum MapClick {
+    /// A double-click on a folder opens it; a triple-click doesn't open it again.
+    public static func opensFolder(clickCount: Int, isFolder: Bool) -> Bool {
+        clickCount == 2 && isFolder
+    }
+}
+
+public enum MapContextAction: Equatable, Sendable {
+    case open, showInFinder, copyPath, addToBasket, moveToTrash, separator
+}
+
+public struct MapContextItem: Equatable, Sendable {
+    public var title: String
+    public var action: MapContextAction
+    public var isEnabled: Bool
+
+    public init(title: String, action: MapContextAction, isEnabled: Bool = true) {
+        self.title = title
+        self.action = action
+        self.isEnabled = isEnabled
+    }
+}
+
+public enum MapContextMenu {
+    /// The right-click menu for a block or list row. `canBasket` is true when the basket would accept it.
+    /// Buckets get no menu. "Move to Trash…" only queues the item and opens the review sheet; it moves nothing itself.
+    public static func items(for node: MapNode, canBasket: Bool, moving: Bool) -> [MapContextItem] {
+        guard node.kind != nil else { return [] }
+        var result: [MapContextItem] = []
+        if node.isFolder { result.append(MapContextItem(title: "Open", action: .open)) }
+        result.append(MapContextItem(title: "Show in Finder", action: .showInFinder))
+        result.append(MapContextItem(title: "Copy Path", action: .copyPath))
+        result.append(MapContextItem(title: "", action: .separator))
+        result.append(MapContextItem(title: "Add to Basket", action: .addToBasket, isEnabled: canBasket))
+        result.append(MapContextItem(title: "Move to Trash\u{2026}", action: .moveToTrash, isEnabled: canBasket && !moving))
+        return result
     }
 }

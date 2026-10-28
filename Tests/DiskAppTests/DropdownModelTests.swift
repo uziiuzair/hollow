@@ -67,4 +67,33 @@ import DiskEngine
             space: Fixtures.space(totalGB: 994, freeGB: 82, reclaimableGB: 0), activity: .ready, period: 1, connectedSince: nil, now: .now)
         #expect(m.rows.first?.opensMap == false)
     }
+
+    @Test func reviewButtonShowsClearableSpace() {
+        func title(_ clearable: UInt64?, connected: Set<String> = ["I"]) -> String? {
+            DropdownModel.make(drives: [Fixtures.internalDrive], selected: "I", connected: connected, summary: nil,
+                               space: Fixtures.space(totalGB: 1000, freeGB: 82, reclaimableGB: 0), activity: .ready, period: 7,
+                               connectedSince: nil, now: .now, clearable: clearable).reviewTitle
+        }
+        #expect(title(6_200_000_000) == "Review 6.2 GB to clear")
+        #expect(title(100_000_000) == "Review 0.1 GB to clear")
+        #expect(title(99_999_999) == nil && title(50_000_000) == nil && title(nil) == nil)
+        #expect(title(6_200_000_000, connected: []) == nil)
+    }
+}
+
+@Test func anyTintCanBeTheInternalDrive() {
+    let violetExternal = KnownDrive(uuid: "T7", name: "Samsung T7", tintIndex: 0, lastSeen: .now, isInternal: false)
+    let tealInternal = KnownDrive(uuid: "I", name: "Macintosh HD", tintIndex: 1, lastSeen: .now, isInternal: true)
+    let m = DropdownModel.make(drives: [violetExternal, tealInternal], selected: "T7", connected: ["I", "T7"], summary: nil,
+                               space: nil, activity: .ready, period: 7, connectedSince: nil, now: .now)
+    #expect(m.tabs.map(\.uuid) == ["I", "T7"] && m.footerRight == .eject)
+}
+
+@Test func deniedAccessShowsANote() {
+    func note(_ s: FDAStatus) -> String? {
+        DropdownModel.make(drives: [Fixtures.internalDrive], selected: "I", connected: ["I"], summary: nil, space: nil,
+                           activity: .ready, period: 7, connectedSince: nil, now: .now, fullDiskAccess: s).accessNote
+    }
+    #expect(note(.denied) == "Some folders can't be read without Full Disk Access.")
+    #expect(note(.unknown) == nil && note(.granted) == nil)
 }

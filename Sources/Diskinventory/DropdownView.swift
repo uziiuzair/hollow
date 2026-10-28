@@ -22,9 +22,13 @@ struct DropdownHost: View {
     let eject: () -> Void
     /// nil opens the drive root; a path opens at that item's parent with it selected.
     let openMap: (String?) -> Void
+    /// "Review N GB to clear": opens the map with the review sheet, pre-filled with what regenerates.
+    let reviewClearable: () -> Void
+    let openSettings: () -> Void
 
     var body: some View {
-        DropdownView(model: state.model, period: state.period, select: select, setPeriod: setPeriod, eject: eject, openMap: openMap)
+        DropdownView(model: state.model, period: state.period, select: select, setPeriod: setPeriod, eject: eject, openMap: openMap,
+                     reviewClearable: reviewClearable, openSettings: openSettings)
     }
 }
 
@@ -53,6 +57,8 @@ struct DropdownView: View {
     let setPeriod: (Int) -> Void
     let eject: () -> Void
     let openMap: (String?) -> Void
+    let reviewClearable: () -> Void
+    let openSettings: () -> Void
 
     private var isOffline: Bool { model.tabs.first(where: \.isSelected)?.isOffline ?? false }
 
@@ -62,6 +68,7 @@ struct DropdownView: View {
             freeSection
             changedSection
             actions
+            if let note = model.accessNote { accessRow(note) }
             footer
         }
         .font(.system(size: 13))
@@ -270,18 +277,58 @@ struct DropdownView: View {
 
     // MARK: Actions
 
+    private var tint: Color {
+        let index = model.tabs.first(where: \.isSelected)?.tintIndex ?? 0
+        return Palette.tints[index % Palette.tints.count]
+    }
+
     private var actions: some View {
-        Button { openMap(nil) } label: {
-            Text("Open map")
-                .fontWeight(.medium)
-                .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30)
-                .background(Tokens.chip, in: RoundedRectangle(cornerRadius: 6))
-                .contentShape(RoundedRectangle(cornerRadius: 6))
+        HStack(spacing: 8) {
+            Button { openMap(nil) } label: {
+                Text("Open map")
+                    .fontWeight(.medium)
+                    .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30)
+                    .background(Tokens.chip, in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canOpenMap)
+            .opacity(model.canOpenMap ? 1 : 0.4)
+            if let title = model.reviewTitle {
+                Button(action: reviewClearable) {
+                    Text(title)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                        .lineLimit(1).minimumScaleFactor(0.85)
+                        .padding(.horizontal, 6)
+                        .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30)
+                        .background(tint, in: RoundedRectangle(cornerRadius: 6))
+                        .contentShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(!model.canOpenMap)
-        .opacity(model.canOpenMap ? 1 : 0.4)
         .padding(.horizontal, 14).padding(.bottom, 12)
+    }
+
+    // MARK: Full Disk Access
+
+    private func accessRow(_ note: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "lock").foregroundStyle(Tokens.fg2)
+            Text(note).foregroundStyle(Tokens.fg2).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button { NSWorkspace.shared.open(FullDiskAccess.settingsURL) } label: {
+                Text("Allow").fontWeight(.medium)
+                    .padding(.horizontal, 10).frame(height: 24)
+                    .background(Tokens.chip, in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+        }
+        .font(.system(size: 11.5))
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .overlay(alignment: .top) { divider() }
     }
 
     // MARK: Footer
@@ -291,7 +338,7 @@ struct DropdownView: View {
             Text(model.footerLeft)
             Spacer()
             switch model.footerRight {
-            case .settings: Text("Settings \u{2318},")
+            case .settings: Button("Settings \u{2318},", action: openSettings).buttonStyle(.plain)
             case .eject: Button("Eject", action: eject).buttonStyle(.plain)
             case .none: EmptyView()
             }

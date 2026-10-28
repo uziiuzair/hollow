@@ -19,3 +19,10 @@ import DiskEngine
     #expect(RingFill.forFraction(1.0) == .full)
     #expect(RingFill.forFraction(1.3) == .full)
 }
+
+@Test func labelUsesChosenThresholds() {
+    let gb: UInt64 = 1_000_000_000
+    let s = VolumeSpace(total: 1000 * gb, available: 50 * gb, availableForImportantUsage: 82 * gb)
+    #expect(MenuBarLabel.make(space: s, showNumber: true, lowFraction: 0.08, criticalFraction: 0.05).level == .normal)
+    #expect(MenuBarLabel.make(space: s, showNumber: true, lowFraction: 0.20, criticalFraction: 0.09).level == .critical)
+}

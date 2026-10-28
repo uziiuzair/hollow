@@ -40,3 +40,13 @@ private let size = CGSize(width: 800, height: 600)
     #expect(s.list.last?.name == "50 more items" && s.list.last?.node == nil)
     #expect(s.list.first?.fraction == 1)
 }
+
+@Test func unreadableChildrenAreListedLast() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000, "locked/g.bin": 1_200_000])
+    let locked = root.appending(path: "locked").path
+    chmod(locked, 0); defer { chmod(locked, 0o755) }
+    let idx = try await DiskScanner(root: root, storage: try Fixtures.tempDir()).run().index
+    let s = MapBuilder.build(index: idx, request: MapRequest(path: "", size: CGSize(width: 400, height: 300), period: 7), baseline: nil)
+    #expect(s.list.last == ListRow(node: nil, name: "locked", size: 0, fraction: 0, kind: nil, isUnreadable: true))
+    #expect(s.unreadableCount == 1 && s.unreadableNote == "1 folder here can't be read.")
+}

@@ -31,6 +31,14 @@ public struct RawEntry: Sendable {
 
 public enum ListingOutcome: Sendable {
     case ok, unreadable, vanished
+    /// Not read: the listing hung or was skipped (`DirectoryLister`). The folder keeps what it had.
+    case timedOut
+}
+
+/// Stops this process from downloading dataless (cloud) files and folders when it touches them: they read as errors
+/// instead. Call once at start; a scan must never cause a cloud download.
+public func forbidDatalessMaterialization() {
+    setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
 }
 
 public struct DirectoryListing: Sendable {
@@ -74,10 +82,16 @@ struct BulkDirectoryReader {
 
     init() {}
 
-    mutating func list(path: String, folder: FolderID) -> DirectoryListing {
-        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    /// `progress` runs as soon as open() has returned, whether or not it succeeded, and after each batch is read
+    /// (`DirectoryLister`'s deadlines).
+    mutating func list(path: String, folder: FolderID, progress: () -> Void = {}) -> DirectoryListing {
+        // Paths are rebuilt from the index, which never holds a symlinked folder, so a symlink anywhere on the way is
+        // refused (O_NOFOLLOW_ANY covers O_NOFOLLOW; the two together are EINVAL).
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC)
+        let openError = errno
+        progress()
         if fd < 0 {
-            let outcome: ListingOutcome = (errno == EACCES || errno == EPERM) ? .unreadable : .vanished
+            let outcome: ListingOutcome = (openError == EACCES || openError == EPERM) ? .unreadable : .vanished
             return DirectoryListing(folder: folder, outcome: outcome, entries: [])
         }
         defer { close(fd) }
@@ -93,6 +107,7 @@ struct BulkDirectoryReader {
         var partial = false
         while true {
             let count = getattrlistbulk(fd, &request, buffer.baseAddress!, Self.bufferSize, Self.fsoptAttrCmnExtended)
+            progress()
             if count < 0 {
                 if errno == EINTR { continue }
                 let failure = errno

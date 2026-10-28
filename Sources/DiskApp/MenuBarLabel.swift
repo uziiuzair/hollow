@@ -14,13 +14,14 @@ public struct MenuBarLabel: Equatable, Sendable {
     }
 
     /// Free space is `availableForImportantUsage`, the number Finder shows.
-    public static func make(space: VolumeSpace, showNumber: Bool) -> MenuBarLabel {
+    public static func make(space: VolumeSpace, showNumber: Bool,
+                            lowFraction: Double = 0.15, criticalFraction: Double = 0.05) -> MenuBarLabel {
         guard space.total > 0 else {
             return MenuBarLabel(text: showNumber ? Format.gb(0) : "", level: .normal, fillFraction: 0)
         }
         let free = min(space.availableForImportantUsage, space.total)
         let freeFraction = Double(free) / Double(space.total)
-        let level: LabelLevel = freeFraction < 0.05 ? .critical : freeFraction < 0.15 ? .low : .normal
+        let level: LabelLevel = freeFraction < criticalFraction ? .critical : freeFraction < lowFraction ? .low : .normal
         return MenuBarLabel(
             text: showNumber ? Format.gb(free) : "",
             level: level,

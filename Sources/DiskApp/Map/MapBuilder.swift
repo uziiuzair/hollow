@@ -30,6 +30,7 @@ struct IndexTreemapSource: TreemapSource {
 
 public enum MapBuilder {
     static let listLimit = 200
+    static let unreadableListLimit = 50
 
     public static func build(index: ScanIndex, request: MapRequest, baseline: SizeSnapshot?) -> MapSnapshot {
         // Resolve the path to the deepest folder that still exists.
@@ -113,9 +114,24 @@ public enum MapBuilder {
                                 fraction: fraction(rest), kind: nil))
         }
 
+        // Unreadable child folders have no size, so no block: they close the list, in sibling order.
+        var unreadable = 0
+        var sibling = index.folders[Int(zoom)].firstChildFolder
+        while sibling != noFolder {
+            let record = index.folders[Int(sibling)]
+            if record.flags.contains(.unreadable) {
+                unreadable += 1
+                if unreadable <= unreadableListLimit {
+                    list.append(ListRow(node: nil, name: index.folderName(sibling), size: 0, fraction: 0, kind: nil,
+                                        isUnreadable: true))
+                }
+            }
+            sibling = record.nextSibling
+        }
+
         return MapSnapshot(path: path, rootPath: index.rootPath, crumbs: crumbs,
                            total: index.folders[Int(zoom)].totalAllocated, period: request.period,
-                           layout: layout, nodes: nodes, list: list)
+                           layout: layout, nodes: nodes, list: list, unreadableCount: unreadable)
     }
 
     private static func growth(_ key: String, now: UInt64, isFile: Bool, _ baseline: SizeSnapshot?) -> Int64 {
