@@ -82,6 +82,14 @@ public struct NamePool: Sendable {
         return String(decoding: Array(head) + Array(tail), as: UTF8.self)
     }
 
+    /// Whether the name at `offset` is exactly `bytes`, read in place without building a String.
+    public func hasBytes(at offset: UInt32, _ bytes: [UInt8]) -> Bool {
+        let start = Int(offset)
+        guard (Int(byte(at: start)) | Int(byte(at: start + 1)) << 8) == bytes.count else { return false }
+        for i in 0..<bytes.count where byte(at: start + 2 + i) != bytes[i] { return false }
+        return true
+    }
+
     /// Calls `body` with each chunk's bytes, in order; together they are the whole pool.
     public func forEachChunk(_ body: (UnsafeRawBufferPointer) throws -> Void) rethrows {
         for chunk in chunks { try chunk.withUnsafeBytes(body) }

@@ -48,3 +48,54 @@ import Testing
     // Stored truncated to what fits in one chunk with its prefix, so it spans at most two.
     #expect(pool.name(at: long) == String(repeating: "z", count: NamePool.chunkSize - 2))
 }
+
+// Task 10d: a folder lookup reads names' bytes in place rather than building a String for every sibling.
+@Test func namePoolComparesBytesInPlace() {
+    var pool = NamePool()
+    // "across" straddles a chunk boundary.
+    let filler = String(repeating: "x", count: NamePool.chunkSize - 5)
+    let a = pool.append(filler)
+    let across = pool.append("across")
+    let empty = pool.append("")
+    #expect(pool.hasBytes(at: a, Array(filler.utf8)))
+    #expect(pool.hasBytes(at: across, Array("across".utf8)))
+    #expect(!pool.hasBytes(at: across, Array("acros".utf8)))
+    #expect(!pool.hasBytes(at: across, Array("acrosz".utf8)))
+    #expect(!pool.hasBytes(at: across, Array("acrosss".utf8)))
+    #expect(pool.hasBytes(at: empty, []))
+}
+
+@Test func folderLookupsMatchASCIIBytesAndNonASCIIAsStrings() throws {
+    let idx = try ScanIndex(rootName: "r", storage: try Fixtures.tempDir())
+    idx.rootDevice = 1
+    _ = try idx.integrate(DirectoryListing(folder: 0, outcome: .ok, entries: [.dir("d1"), .dir("caf\u{E9}"), .dir("tmp")]),
+                          rootDevice: 1)
+    #expect(idx.folder(atRelativePath: "tmp").map(idx.folderName) == "tmp")
+    #expect(idx.folder(atRelativePath: "tm") == nil)
+    // The decomposed spelling finds the composed name, as before.
+    #expect(idx.folder(atRelativePath: "cafe\u{301}").map(idx.folderName) == "caf\u{E9}")
+    #expect(idx.deepestFolder(onRelativePath: "tmp/new/deeper") == idx.folder(atRelativePath: "tmp"))
+    #expect(idx.deepestFolder(onRelativePath: "gone/x") == 0)
+}
+
+// A folder with many subfolders is looked up by name through a table that follows every change to its children.
+@Test func lookupsInABigFolderFollowItsRelists() throws {
+    let idx = try ScanIndex(rootName: "r", storage: try Fixtures.tempDir())
+    idx.rootDevice = 1
+    let names = (0..<3000).map { "d\($0)" }
+    _ = try idx.integrate(DirectoryListing(folder: 0, outcome: .ok, entries: names.map { .dir($0) }), rootDevice: 1)
+    #expect(idx.folder(atRelativePath: "nope") == nil)
+    #expect(idx.childLookupTables == 1)
+    let kept = try #require(idx.folder(atRelativePath: "d2999"))
+    #expect(idx.folderName(kept) == "d2999")
+    // d0 goes, "new" comes: both lookups see it at once.
+    let after = names.dropFirst() + ["new"]
+    _ = try idx.relist(DirectoryListing(folder: 0, outcome: .ok, entries: after.map { .dir($0) }))
+    #expect(idx.folder(atRelativePath: "d0") == nil)
+    #expect(idx.folder(atRelativePath: "new").map(idx.folderName) == "new")
+    #expect(idx.folder(atRelativePath: "d2999") == kept)
+    #expect(idx.deepestFolder(onRelativePath: "d0/x") == 0)
+    idx.resetContents(of: 0)
+    #expect(idx.folder(atRelativePath: "new") == nil)
+    #expect(idx.childLookupTables == 0)
+}

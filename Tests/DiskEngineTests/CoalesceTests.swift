@@ -345,3 +345,22 @@ private func relistTimes(_ live: LiveIndex, _ folder: String, clock: ManualClock
     #expect(await live.stats().foldersRelisted == before + 1)
     try await live.close()
 }
+
+// A change waiting for a folder that has since left the index (its parent's relist found it gone) is covered by that
+// relist: it never turns into another relist of the parent.
+@Test func aWaitingChangeForAFolderSinceRemovedDoesNotRelistItsParent() async throws {
+    let clock = ManualClock()
+    let (live, root, base, _) = try await opened(["a/k/f.bin": 10, "b/g.bin": 10], window: .seconds(10), clock: clock)
+    await live.enqueue([change(root + "/a/k", base + 1)])
+    await live.enqueue([change(root + "/a/k", base + 2)])
+    try FileManager.default.removeItem(atPath: root + "/a/k")
+    await live.enqueue([change(root + "/a", base + 3)])
+    #expect(await live.withIndex { $0.folder(atRelativePath: "a/k") } == nil)
+    let before = await live.stats().foldersRelisted
+    clock.advance(.seconds(10))
+    await live.flushDue()
+    #expect(await live.stats().foldersRelisted == before)
+    // Applied all the same: the stored ID moves past it.
+    #expect(await live.withIndex { $0.lastEventID } == base + 2)
+    try await live.close()
+}

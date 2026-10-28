@@ -41,6 +41,14 @@ public final class ScanIndex {
     }
     /// `exclusions` as parent relative path -> excluded child names.
     private var excludedChildren: [String: Set<String>] = [:]
+    /// Big folders' subfolders by name, built when a lookup in one misses and dropped whenever its children change, so a
+    /// temp folder with 20,000 entries isn't passed over for every event under it. At most `maxTabled` names in all.
+    private var childTables: [FolderID: [String: FolderID]] = [:]
+    private var tabledNames = 0
+    static let tableAbove = 1024
+    static let maxTabled = 65_536
+    /// Tests only.
+    var childLookupTables: Int { childTables.count }
     /// Folders marked `.stale` since the owner last took them, to list again later.
     public var newlyStale: [FolderID] = []
     public internal(set) var garbageFolders = 0
@@ -232,6 +240,7 @@ public final class ScanIndex {
             child = next
         }
         garbageFiles += Int(folders[id].bigFileCount)
+        untable(folder)
         let keep = folders[id].flags.intersection(.garbage)
         folders[id] = FolderRecord(parent: folders[id].parent, nameOffset: folders[id].nameOffset)
         folders[id].flags = keep
@@ -241,11 +250,7 @@ public final class ScanIndex {
     public func folder(atRelativePath path: String) -> FolderID? {
         var current: FolderID = 0
         for part in path.split(separator: "/", omittingEmptySubsequences: true) {
-            var child = folders[Int(current)].firstChildFolder
-            while child != noFolder, folderName(child) != part {
-                child = folders[Int(child)].nextSibling
-            }
-            guard child != noFolder else { return nil }
+            guard let child = child(named: part, of: current) else { return nil }
             current = child
         }
         return current
@@ -256,14 +261,63 @@ public final class ScanIndex {
     public func deepestFolder(onRelativePath path: String) -> FolderID {
         var current: FolderID = 0
         for part in path.split(separator: "/", omittingEmptySubsequences: true) {
-            var child = folders[Int(current)].firstChildFolder
-            while child != noFolder, folderName(child) != part {
-                child = folders[Int(child)].nextSibling
-            }
-            guard child != noFolder else { return current }
+            guard let child = child(named: part, of: current) else { return current }
             current = child
         }
         return current
+    }
+
+    /// `folder`'s subfolder named `name`, or nil. An ASCII name is matched on its bytes, read in place: a lookup passes
+    /// over every sibling, and event paths and listings both carry a name's own bytes. Any other name is compared as
+    /// String comparison has it, so its NFC and NFD spellings agree.
+    private func child(named name: Substring, of folder: FolderID) -> FolderID? {
+        if let table = childTables[folder] { return table[String(name)] }
+        var child = folders[Int(folder)].firstChildFolder
+        var passed = 0
+        if name.utf8.allSatisfy({ $0 < 0x80 }) {
+            let bytes = Array(name.utf8)
+            while child != noFolder, !folderNames.hasBytes(at: folders[Int(child)].nameOffset, bytes) {
+                child = folders[Int(child)].nextSibling
+                passed += 1
+            }
+        } else {
+            while child != noFolder, folderName(child) != name {
+                child = folders[Int(child)].nextSibling
+                passed += 1
+            }
+        }
+        guard child != noFolder else {
+            if passed > Self.tableAbove { tableChildren(of: folder) }
+            return nil
+        }
+        return child
+    }
+
+    /// After a miss in a folder with more than `tableAbove` subfolders: its subfolders by name. The first of two equal
+    /// names wins, as in a pass over the siblings.
+    private func tableChildren(of folder: FolderID) {
+        var table: [String: FolderID] = [:]
+        var child = folders[Int(folder)].firstChildFolder
+        while child != noFolder {
+            let name = folderName(child)
+            if table[name] == nil { table[name] = child }
+            child = folders[Int(child)].nextSibling
+        }
+        guard table.count <= Self.maxTabled else { return }
+        if tabledNames + table.count > Self.maxTabled { dropChildTables() }
+        childTables[folder] = table
+        tabledNames += table.count
+    }
+
+    /// `folder`'s children changed (or it became garbage): its table, if any, goes.
+    private func untable(_ folder: FolderID) {
+        guard !childTables.isEmpty else { return }
+        if let table = childTables.removeValue(forKey: folder) { tabledNames -= table.count }
+    }
+
+    private func dropChildTables() {
+        childTables = [:]
+        tabledNames = 0
     }
 
     /// The folder's path relative to the root ("" for the root).
@@ -321,6 +375,7 @@ public final class ScanIndex {
     }
 
     private func link(_ children: [FolderID], under folder: FolderID) {
+        untable(folder)
         folders[Int(folder)].firstChildFolder = children.first ?? noFolder
         for (child, next) in zip(children, children.dropFirst() + [noFolder]) {
             folders[Int(child)].nextSibling = next
@@ -341,6 +396,7 @@ public final class ScanIndex {
         var stack = [root]
         while let folder = stack.popLast() {
             folders[Int(folder)].flags.insert(.garbage)
+            untable(folder)
             garbageFolders += 1
             garbageFiles += Int(folders[Int(folder)].bigFileCount)
             var child = folders[Int(folder)].firstChildFolder

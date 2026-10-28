@@ -385,15 +385,16 @@ public actor LiveIndex {
         try await apply(changes, advanceTo: changes.map(\.id).max() ?? 0)
     }
 
-    /// Applies changed folders, then advances the stored event ID to `eventID` (never back).
-    func apply(_ changes: [FSChange], advanceTo eventID: UInt64) async throws {
+    /// Applies changed folders, then advances the stored event ID to `eventID` (never back). `routed`: each path is the
+    /// folder `enqueue` mapped it to, so one that has left the index since is skipped (see `applyLocked`).
+    func apply(_ changes: [FSChange], advanceTo eventID: UInt64, routed: Bool = false) async throws {
         await lock()
         defer { unlock() }
         guard !closed, let index, !changes.isEmpty else { return }
         defer { armStaleRetries(index) }
         do {
             let start = ContinuousClock.now
-            let outcome = try await applyLocked(changes, to: index)
+            let outcome = try await applyLocked(changes, to: index, routed: routed)
             busyTime += ContinuousClock.now - start
             // A scan cut short (cancelled, or the volume going) leaves folders pending: not applied, whatever it says.
             guard index.pending.isEmpty else { throw CancellationError() }
@@ -479,7 +480,7 @@ public actor LiveIndex {
             }
         }
         if let applied = due.map(\.id).max() {
-            try? await apply(due, advanceTo: min(applied, deferredFloor))
+            try? await apply(due, advanceTo: min(applied, deferredFloor), routed: true)
         }
         scheduleFlush()
     }
@@ -502,7 +503,7 @@ public actor LiveIndex {
             due.append(FSChange(path: path, id: 0, rescanSubtree: false, historyLost: false))
         }
         if let applied = due.map(\.id).max() {
-            try? await apply(due, advanceTo: min(applied, deferredFloor))
+            try? await apply(due, advanceTo: min(applied, deferredFloor), routed: true)
         }
         scheduleFlush()
     }
@@ -645,7 +646,7 @@ public actor LiveIndex {
         case folders([String: Int64], moved: [String: UInt64], renamed: Set<String>)
     }
 
-    private func applyLocked(_ changes: [FSChange], to index: ScanIndex) async throws -> ApplyOutcome {
+    private func applyLocked(_ changes: [FSChange], to index: ScanIndex, routed: Bool) async throws -> ApplyOutcome {
         applies += 1
         // Covered by a full scan that began after them: events dropped while it ran must not start another.
         let covered = coveredThrough
@@ -675,6 +676,9 @@ public actor LiveIndex {
             var subtrees: Set<FolderID> = []
             for change in changes {
                 guard let relative = relativePath(change.path), !isExcluded(relative) else { continue }
+                // A routed folder gone from the index was removed by its parent's relist since, which covers it:
+                // relisting the parent again would only repeat that.
+                if routed, !change.rescanSubtree, index.folder(atRelativePath: relative) == nil { continue }
                 let folder = listable(deepestFolder(relative, in: index), in: index)
                 #if DEBUG
                 if change.rescanSubtree && folder == 0 {
