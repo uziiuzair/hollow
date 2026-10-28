@@ -60,7 +60,14 @@ struct BulkDirectoryReader {
     private static let dir = UInt32(ATTR_DIR_MOUNTSTATUS)
     private static let file = UInt32(ATTR_FILE_LINKCOUNT) | UInt32(ATTR_FILE_ALLOCSIZE) | UInt32(ATTR_FILE_DATALENGTH)
 
-    private var buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: bufferSize, alignment: 8)
+    /// Owns the read buffer so it is freed with the reader.
+    private final class Buffer {
+        let bytes = UnsafeMutableRawBufferPointer.allocate(byteCount: BulkDirectoryReader.bufferSize, alignment: 8)
+        deinit { bytes.deallocate() }
+    }
+
+    private let storage = Buffer()
+    private var buffer: UnsafeMutableRawBufferPointer { storage.bytes }
 
     init() {}
 

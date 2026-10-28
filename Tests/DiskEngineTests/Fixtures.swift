@@ -53,3 +53,19 @@ extension RawEntry {
                         inode: nextInode, linkCount: 1, flags: [], isMountPoint: false)
     }
 }
+
+extension Fixtures {
+    /// Sum of allocated sizes under `root`, counting each inode once, not following symlinks.
+    static func sumAllocated(under root: URL) -> UInt64 {
+        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .isRegularFileKey, .fileResourceIdentifierKey]
+        var seen = Set<String>()
+        var total: UInt64 = 0
+        for case let url as URL in FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys)! {
+            guard let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { continue }
+            let id = "\(v.fileResourceIdentifier!)"
+            guard seen.insert(id).inserted else { continue }
+            total += UInt64(v.totalFileAllocatedSize ?? 0)
+        }
+        return total
+    }
+}
