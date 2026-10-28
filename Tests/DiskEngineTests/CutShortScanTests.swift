@@ -60,3 +60,59 @@ private func historyDays(_ store: URL) throws -> [Day] {
     #expect(!FileManager.default.fileExists(atPath: store.appending(path: ScanIndex.snapshotName).path))
     #expect(try historyDays(store).isEmpty)
 }
+
+// Final review M4: an exclusions change whose scan is cut short (the drive still mounted) keeps what it didn't list as
+// pending, with no full rescan: the next apply finishes it, and so does the next open.
+@Test func cutShortExclusionScanResumesWithoutAFullRescan() async throws {
+    let root = try Fixtures.tree(["a/keep/f.bin": 2_000_000, "a/skip/x/g.bin": 3_000_000, "a/skip/y/h.bin": 1_000_000])
+    let store = try Fixtures.tempDir()
+    let live = LiveIndex(volumeRoot: root, store: store, exclusions: ["a/skip"])
+    await live.disableWatcher()
+    _ = try await live.open()
+    await live.injectBeforeScan { withUnsafeCurrentTask { $0?.cancel() } }
+    await #expect(throws: CancellationError.self) { try await Task { try await live.setExclusions([]) }.value }
+    await live.injectBeforeScan(nil)
+    #expect(await live.withIndex { !$0.pending.isEmpty })
+    #expect(FileManager.default.fileExists(atPath: store.appending(path: ScanIndex.snapshotName).path))
+    try await live.apply([FSChange(path: Fixtures.realPath(root) + "/a/keep", id: 0, rescanSubtree: false, historyLost: false)])
+    #expect(await live.stats().fullRescans == 0)
+    #expect(await live.withIndex { $0.pending.isEmpty })
+    #expect(try await live.read { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root))
+    try await live.close()
+}
+
+@Test func cutShortExclusionScanResumesAtTheNextOpen() async throws {
+    let root = try Fixtures.tree(["a/keep/f.bin": 2_000_000, "a/skip/x/g.bin": 3_000_000])
+    let store = try Fixtures.tempDir()
+    let live = LiveIndex(volumeRoot: root, store: store, exclusions: ["a/skip"])
+    await live.disableWatcher()
+    _ = try await live.open()
+    await live.injectBeforeScan { withUnsafeCurrentTask { $0?.cancel() } }
+    await #expect(throws: CancellationError.self) { try await Task { try await live.setExclusions([]) }.value }
+    try await live.close()
+    let again = LiveIndex(volumeRoot: root, store: store)
+    await again.disableWatcher()
+    #expect(try await again.open() == .resumed)
+    #expect(try await again.read { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root))
+    try await again.close()
+}
+
+// Final review M4: the same for a retry of unreadable folders.
+@Test func cutShortUnreadableRetryResumesWithoutAFullRescan() async throws {
+    let root = try Fixtures.tree(["a/locked/sub/f.bin": 2_000_000, "a/open.bin": 1_200_000])
+    let locked = root.appending(path: "a/locked").path
+    chmod(locked, 0); defer { chmod(locked, 0o755) }
+    let live = LiveIndex(volumeRoot: root, store: try Fixtures.tempDir())
+    await live.disableWatcher()
+    _ = try await live.open()
+    chmod(locked, 0o755)
+    await #expect(throws: CancellationError.self) {
+        try await Task { try await live.retryUnreadable(beforeScan: { withUnsafeCurrentTask { $0?.cancel() } }) }.value
+    }
+    #expect(await live.withIndex { !$0.pending.isEmpty })
+    try await live.apply([FSChange(path: Fixtures.realPath(root) + "/a", id: 0, rescanSubtree: false, historyLost: false)])
+    #expect(await live.stats().fullRescans == 0)
+    #expect(await live.withIndex { $0.pending.isEmpty })
+    #expect(try await live.read { $0.folders[0].totalAllocated } == Fixtures.sumAllocated(under: root))
+    try await live.close()
+}

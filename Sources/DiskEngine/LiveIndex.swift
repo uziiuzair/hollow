@@ -253,6 +253,8 @@ public actor LiveIndex {
         }
         try fault?()
         if !toScan.isEmpty { try await scan(index, starting: toScan) }
+        // Cut short (cancelled) with the drive still mounted: what wasn't listed stays pending for the next scan or open.
+        guard index.pending.isEmpty else { throw CancellationError() }
     }
 
     /// Changes the folders left out of the index. Relists only their parents; never a full scan.
@@ -267,6 +269,11 @@ public actor LiveIndex {
         defer { armStaleRetries(index) }
         do {
             try await reconcile(from: old, in: index)
+        } catch is CancellationError where !index.pending.isEmpty {
+            // Cut short, not failed: the pending folders are finished by the next scan or open, no full rescan.
+            indexChanged(folders: nil)
+            scheduleSave()
+            throw CancellationError()
         } catch {
             indexChanged(folders: nil)
             needsFullRescan = true
@@ -301,6 +308,12 @@ public actor LiveIndex {
         if !toScan.isEmpty {
             beforeScan?()
             try await scan(index, starting: toScan)
+        }
+        // Cut short with the drive still mounted: what wasn't listed stays pending for the next scan or open.
+        guard index.pending.isEmpty else {
+            indexChanged(folders: nil)
+            scheduleSave()
+            throw CancellationError()
         }
         if readable > 0 {
             indexChanged(folders: nil)
@@ -681,7 +694,8 @@ public actor LiveIndex {
             index.resetContents(of: 0)
             let toScan = try index.integrate(root, rootDevice: index.rootDevice)
             try fault?()
-            if !toScan.isEmpty { try await scan(index, starting: toScan) }
+            // Also when only folders an earlier cut-short scan left pending are waiting: this apply finishes them.
+            if !toScan.isEmpty || !index.pending.isEmpty { try await scan(index, starting: toScan) }
             needsFullRescan = false
             coveredThrough = max(coveredThrough, coverage)
             return .full
@@ -746,7 +760,8 @@ public actor LiveIndex {
                 if result.namesChanged || listing.outcome == .timedOut { renamed.insert(index.relativePath(of: folder)) }
             }
             try fault?()
-            if !toScan.isEmpty { try await scan(index, starting: toScan) }
+            // Also when only folders an earlier cut-short scan left pending are waiting: this apply finishes them.
+            if !toScan.isEmpty || !index.pending.isEmpty { try await scan(index, starting: toScan) }
             // A garbage folder is found again by path: one a relist removed is gone (0), and one a subtree rescan
             // rebuilt is the new one.
             var delta: [String: Int64] = [:]
@@ -995,6 +1010,12 @@ public actor LiveIndex {
     }
 
     private func scan(_ target: ScanIndex, starting: [FolderID]) async throws {
+        // An earlier scan cut short with the drive still mounted (a retry or an exclusions change) left folders pending.
+        // They join this one, or its completion would clear `pending` with them still unlisted.
+        let requested = Set(starting)
+        let starting = starting + target.pending.filter {
+            !requested.contains($0) && !target.folders[Int($0)].flags.contains(.garbage)
+        }
         let store = self.store
         let path = rootPath
         let device = rootDevice
