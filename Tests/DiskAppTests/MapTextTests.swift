@@ -60,7 +60,7 @@ import Testing
     #expect(MapKey.command(keyCode: 36, modifiers: [], searchFocused: false) == .zoomIn)
     #expect(MapKey.command(keyCode: 53, modifiers: [], searchFocused: false) == .zoomOut)
     #expect(MapKey.command(keyCode: 49, modifiers: [], searchFocused: false) == .quickLook)
-    #expect(MapKey.command(keyCode: 40, modifiers: .command, searchFocused: false) == .openCommands)
+    #expect(MapKey.command(keyCode: 40, characters: "k", modifiers: .command, searchFocused: false) == .openCommands)
     #expect(MapKey.command(keyCode: 126, modifiers: [], searchFocused: false) == .selectPrevious)
     #expect(MapKey.command(keyCode: 125, modifiers: [], searchFocused: false) == .selectNext)
     #expect(MapKey.command(keyCode: 53, modifiers: [], searchFocused: true) == .closeSearch)
@@ -69,4 +69,14 @@ import Testing
     #expect(MapKey.command(keyCode: 125, modifiers: [], searchFocused: true) == .commandDown)
     #expect(MapKey.command(keyCode: 49, modifiers: [], searchFocused: true) == nil)
     #expect(MapKey.command(keyCode: 40, modifiers: [], searchFocused: false) == nil)
+}
+
+// ⌘K follows the character, not the key's position: on Dvorak "k" is the QWERTY "v" key (9),
+// and the QWERTY "k" key (40) types "t".
+@Test func commandKFollowsTheLayout() {
+    #expect(MapKey.command(keyCode: 9, characters: "k", modifiers: .command, searchFocused: false) == .openCommands)
+    #expect(MapKey.command(keyCode: 40, characters: "t", modifiers: .command, searchFocused: false) == nil)
+    #expect(MapKey.command(keyCode: 40, characters: "K", modifiers: .command, searchFocused: false) == .openCommands)
+    #expect(MapKey.command(keyCode: 40, characters: "k", modifiers: [.command, .shift], searchFocused: false) == nil)
+    #expect(MapKey.command(keyCode: 40, characters: "k", modifiers: [], searchFocused: false) == nil)
 }

@@ -54,7 +54,10 @@ public enum MapKeyCommand: Equatable, Sendable {
 }
 
 public enum MapKey {
-    public static func command(keyCode: UInt16, modifiers: KeyModifiers, searchFocused: Bool) -> MapKeyCommand? {
+    /// `keyCode` names the non-character keys (Return, Escape, Space, arrows); `characters` is the
+    /// event's `charactersIgnoringModifiers`, which matches letters on any keyboard layout.
+    public static func command(keyCode: UInt16, characters: String? = nil, modifiers: KeyModifiers,
+                               searchFocused: Bool) -> MapKeyCommand? {
         if searchFocused {
             guard modifiers.isEmpty else { return nil }
             switch keyCode {
@@ -65,7 +68,8 @@ public enum MapKey {
             default: return nil
             }
         }
-        if keyCode == 40 { return modifiers == .command ? .openCommands : nil }
+        // By character (the event's charactersIgnoringModifiers), so ⌘K works on any layout.
+        if modifiers == .command { return characters?.lowercased() == "k" ? .openCommands : nil }
         guard modifiers.isEmpty else { return nil }
         switch keyCode {
         case 36: return .zoomIn

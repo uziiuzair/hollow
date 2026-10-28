@@ -134,7 +134,8 @@ final class MapWindowController: NSWindowController, NSWindowDelegate {
     private func handleKey(_ event: NSEvent) -> Bool {
         guard let window, window.isKeyWindow, event.window === window, let model, let ui else { return false }
         let modifiers = KeyModifiers(eventFlags: event.modifierFlags)
-        guard let command = MapKey.command(keyCode: event.keyCode, modifiers: modifiers, searchFocused: ui.searchFocused)
+        guard let command = MapKey.command(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers,
+                                           modifiers: modifiers, searchFocused: ui.searchFocused)
         else { return false }
         switch command {
         case .zoomIn: zoomIntoSelection()
