@@ -153,3 +153,36 @@ private func wideTree(outer: Int, inner: Int) throws -> URL {
     // Uncancelled, the unmount waits for the full scan plus two saves.
     #expect(unmountTook < fullScan, "unmount took \(unmountTook), a full scan \(fullScan)")
 }
+
+@MainActor @Test func holdKeepsWarmUntilReleased() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir(), coolDown: .milliseconds(200))
+    await c.hold(); await c.warm()
+    try await Task.sleep(for: .milliseconds(600))
+    #expect(c.activity == .ready)
+    c.release()
+    try await Task.sleep(for: .milliseconds(600))
+    #expect(c.activity == .idle)
+}
+
+@MainActor @Test func holdAfterUnmountStaysOffline() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000]); let store = try Fixtures.tempDir()
+    let c = DriveController(volume: try Fixtures.volume(root), store: store)
+    await c.willUnmount(); await c.hold()
+    #expect(c.activity == .offline)
+    #expect(await c.buildMap(MapRequest(path: "", size: CGSize(width: 400, height: 300), period: 7)) == nil)
+    #expect(!FileManager.default.fileExists(atPath: store.appending(path: "index.snapshot").path))
+}
+
+@MainActor @Test func buildMapAndGenerationWhileHeld() async throws {
+    let root = try Fixtures.tree(["a/f.bin": 2_000_000])
+    let c = DriveController(volume: try Fixtures.volume(root), store: try Fixtures.tempDir())
+    await c.hold()
+    let s = try #require(await c.buildMap(MapRequest(path: "", size: CGSize(width: 400, height: 300), period: 7)))
+    #expect(s.total > 0 && s.layout.topLevelCount >= 1)
+    let before = c.generation
+    try Data(count: 2_000_000).write(to: root.appending(path: "new.bin"))
+    for _ in 0..<50 where c.generation == before { try await Task.sleep(for: .milliseconds(100)) }
+    #expect(c.generation > before)
+    c.release(); await c.cool()
+}
