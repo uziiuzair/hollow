@@ -7,6 +7,14 @@ public struct HoverCard: Equatable, Sendable {
     public var changeIsGrowth: Bool
     public var explanation: String?
 
+    public init(title: String, detail: String, change: String?, changeIsGrowth: Bool, explanation: String?) {
+        self.title = title
+        self.detail = detail
+        self.change = change
+        self.changeIsGrowth = changeIsGrowth
+        self.explanation = explanation
+    }
+
     static let changeThreshold: Int64 = 100_000_000
 
     public static func make(node: MapNode, size: UInt64, period: Int) -> HoverCard {

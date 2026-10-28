@@ -18,6 +18,8 @@ public struct LabelLine: Equatable, Sendable {
 
 public struct LabelPlan: Equatable, Sendable {
     public var lines: [LabelLine]
+
+    public init(lines: [LabelLine]) { self.lines = lines }
 }
 
 public enum LabelFit {
