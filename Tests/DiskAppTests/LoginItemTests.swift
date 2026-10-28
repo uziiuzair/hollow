@@ -2,10 +2,14 @@ import Foundation
 import Testing
 @testable import DiskApp
 
+final class MemoryFlags: FlagStore {
+    private var flags: [String: Bool] = [:]
+    func bool(forKey key: String) -> Bool { flags[key] ?? false }
+    func set(_ value: Bool, forKey key: String) { flags[key] = value }
+}
+
 @Test func registersOnlyOnce() throws {
-    let name = "test-\(UUID())"
-    let d = UserDefaults(suiteName: name)!
-    defer { d.removePersistentDomain(forName: name) }
+    let d = MemoryFlags()
     var calls = 0
     try LoginItem.registerOnFirstRun(defaults: d) { calls += 1 }
     try LoginItem.registerOnFirstRun(defaults: d) { calls += 1 }

@@ -86,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if LoginItem.shouldRegister(bundlePath: Bundle.main.bundlePath, home: NSHomeDirectory()) {
             do {
-                try LoginItem.registerOnFirstRun(defaults: .standard) { try SMAppService.mainApp.register() }
+                try LoginItem.registerOnFirstRun(defaults: UserDefaults.standard) { try SMAppService.mainApp.register() }
             } catch {
                 // Ad-hoc signed builds may be refused; launch at login is optional.
                 NSLog("Diskinventory: could not register login item: \(error)")

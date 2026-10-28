@@ -14,7 +14,7 @@ let package = Package(
         .target(name: "DiskEngine"),
         .executableTarget(name: "diskscan", dependencies: ["DiskEngine"]),
         .testTarget(name: "DiskEngineTests", dependencies: ["DiskEngine"]),
-        .target(name: "DiskApp", dependencies: ["DiskEngine"]),
+        .target(name: "DiskApp", dependencies: ["DiskEngine"], resources: [.copy("Resources/lenses.json")]),
         .executableTarget(name: "Diskinventory", dependencies: ["DiskApp"]),
         .testTarget(name: "DiskAppTests", dependencies: ["DiskApp"]),
     ]

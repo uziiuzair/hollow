@@ -16,6 +16,8 @@ APP=".build/$NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/$NAME"
+mkdir -p "$APP/Contents/Resources"
+cp Sources/DiskApp/Resources/lenses.json "$APP/Contents/Resources/lenses.json"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
