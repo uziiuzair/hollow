@@ -137,10 +137,22 @@ public actor LiveIndex {
     private var busyTime: Duration = .zero
     /// A folder applied within this window of its last apply waits until the window has passed (background churn).
     private let coalesceWindow: Duration
-    /// Changes waiting out the window, by path, merged: the highest ID, flags OR-ed.
-    private var deferred: [String: FSChange] = [:]
-    /// When each recently changed path was last applied. Entries older than the window are pruned.
-    private var lastRelist: [String: ContinuousClock.Instant] = [:]
+    /// One recently applied folder: when it was last applied, the window it waits now, how many applies in a row had a
+    /// change each time, and the change waiting out the window (merged: the highest ID, flags OR-ed).
+    private struct Coalesced {
+        var last: ContinuousClock.Instant
+        var window: Duration
+        var streak: Int
+        var waiting: FSChange?
+    }
+    /// Recently applied folders, by the absolute path of the folder a change relists (not the event's own path).
+    /// Pruned once a window passes with no change waiting, which also ends a backoff.
+    private var coalesced: [String: Coalesced] = [:]
+    /// Past this many tracked folders the coldest are dropped, any change they hold applied with the batch.
+    private var trackedLimit = 4096
+    /// A folder applied this many times in a row with a change each time waits twice as long, up to `maxWindow`.
+    private static let backoffAfter = 3
+    private static let maxWindow: Duration = .seconds(300)
     private var flushTask: Task<Void, Never>?
     /// Folders whose listing hung or was skipped, by absolute path, and when to list them again. Not deferred changes:
     /// their events count as applied (with what the folder had), so they never hold back the stored event ID.
@@ -166,6 +178,17 @@ public actor LiveIndex {
     /// What `exclusions.json` last held, so a save rewrites it only when it differs.
     private var writtenExclusions: Set<String>?
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    #if DEBUG
+    /// What each relisted folder cost in the current minute, by the folder's absolute path; logged and reset each minute.
+    private struct FolderActivity {
+        var events = 0
+        var paths: Set<String> = []
+        var relists = 0
+        var listTime: Duration = .zero
+    }
+    private var activity: [String: FolderActivity] = [:]
+    private var activitySince = ContinuousClock.now
+    #endif
 
     public init(volumeRoot: URL, store: URL, saveDebounce: Duration = .seconds(30), compactAbove: Double = 0.25,
                 exclusions: Set<String> = [], coalesceWindow: Duration = .seconds(10),
@@ -396,31 +419,64 @@ public actor LiveIndex {
         scheduleSave()
     }
 
-    /// Takes a batch from the watcher. A folder applied within `coalesceWindow` waits until the window has passed, so a
-    /// folder another app writes to every second costs one relist per window. Subtree rescans and lost history never
-    /// wait, and a busy folder never holds up another.
+    /// Takes a batch from the watcher. A folder applied within its window waits until the window has passed, so a
+    /// folder another app writes to every second costs one relist per window, however many of its children the events
+    /// name. A folder that keeps changing waits longer each time (10 s, 20 s… up to 5 min) until a window passes quietly.
+    /// Subtree rescans and lost history never wait, and a busy folder never holds up another.
     func enqueue(_ changes: [FSChange]) async {
+        guard !closed else { return }
+        // The folder each change relists, looked up while no apply or scan is changing the index.
+        await lock()
+        let keys = changes.map { $0.historyLost ? $0.path : folderKey($0.path) }
+        unlock()
         guard !closed else { return }
         let now = self.now()
         var due: [FSChange] = []
-        for change in changes {
-            if change.historyLost || change.rescanSubtree {
+        #if DEBUG
+        for (change, key) in zip(changes, keys) {
+            activity[key, default: FolderActivity()].events += 1
+            if activity[key]!.paths.count < 10_000 { activity[key]!.paths.insert(change.path) }
+        }
+        logActivityIfDue()
+        #endif
+        // Where each folder's relist sits in `due`, so more changes to it in this batch join it rather than wait.
+        var batched: [String: Int] = [:]
+        for (change, key) in zip(changes, keys) {
+            var routed = change
+            if !change.historyLost { routed.path = key }
+            if !change.historyLost, !change.rescanSubtree, let at = batched[key] {
+                due[at] = Self.merged(due[at], routed)
+            } else if change.historyLost || change.rescanSubtree {
                 // The rescan covers a relist of the same folder that is waiting out its window.
-                if let waiting = deferred.removeValue(forKey: change.path) { due.append(waiting) }
-                due.append(change)
-                lastRelist[change.path] = now
-            } else if let last = lastRelist[change.path], now - last < coalesceWindow {
-                deferred[change.path] = deferred[change.path].map { Self.merged($0, change) } ?? change
+                if let waiting = coalesced[key]?.waiting { due.append(waiting) }
+                if change.rescanSubtree { batched[key] = due.count }
+                due.append(routed)
+                coalesced[key, default: Coalesced(last: now, window: coalesceWindow, streak: 1)].last = now
+                coalesced[key]!.waiting = nil
+            } else if var entry = coalesced[key], now - entry.last < entry.window {
+                entry.waiting = entry.waiting.map { Self.merged($0, routed) } ?? routed
+                coalesced[key] = entry
+            } else if var entry = coalesced[key], let waiting = entry.waiting {
+                // Its window has just passed with a change waiting: applied now, as the flush would.
+                batched[key] = due.count
+                due.append(Self.merged(waiting, routed))
+                entry.waiting = nil
+                applyAgain(&entry, at: now)
+                coalesced[key] = entry
             } else {
-                // Leading edge: the first change in a while applies at once.
-                due.append(change)
-                lastRelist[change.path] = now
+                // Leading edge: the first change in a while (a window passed quietly) applies at once.
+                batched[key] = due.count
+                due.append(routed)
+                coalesced[key] = Coalesced(last: now, window: coalesceWindow, streak: 1)
             }
         }
+        due += evictColdest()
         // A full rescan covers everything waiting.
         if due.contains(where: \.historyLost) {
-            due += deferred.values
-            deferred = [:]
+            for (key, entry) in coalesced where entry.waiting != nil {
+                due.append(entry.waiting!)
+                coalesced[key]!.waiting = nil
+            }
         }
         if let applied = due.map(\.id).max() {
             try? await apply(due, advanceTo: min(applied, deferredFloor))
@@ -432,10 +488,13 @@ public actor LiveIndex {
     func flushDue() async {
         guard !closed else { return }
         let now = self.now()
-        var due = deferred.values.filter { change in lastRelist[change.path].map { now - $0 >= coalesceWindow } ?? true }
-        for change in due {
-            deferred[change.path] = nil
-            lastRelist[change.path] = now
+        var due: [FSChange] = []
+        for (key, entry) in coalesced where entry.waiting != nil && now - entry.last >= entry.window {
+            var entry = entry
+            due.append(entry.waiting!)
+            entry.waiting = nil
+            applyAgain(&entry, at: now)
+            coalesced[key] = entry
         }
         // ID 0: a retry moves the stored event ID nowhere.
         for (path, at) in staleRetry where at <= now {
@@ -448,15 +507,40 @@ public actor LiveIndex {
         scheduleFlush()
     }
 
-    /// One timer, due when the earliest deferred change's window ends. Prunes paths whose window has passed.
+    /// A folder applied again with a change since its last apply: once it has been `backoffAfter` times in a row, its
+    /// window doubles, up to `maxWindow`.
+    private func applyAgain(_ entry: inout Coalesced, at now: ContinuousClock.Instant) {
+        entry.last = now
+        entry.streak += 1
+        if entry.streak >= Self.backoffAfter { entry.window = min(entry.window * 2, Self.maxWindow) }
+    }
+
+    /// Past `trackedLimit`, drops the coldest folders (the shortest window, then the longest ago) and returns the changes
+    /// they held, to apply now: they are only applied early, never lost.
+    private func evictColdest() -> [FSChange] {
+        let excess = coalesced.count - trackedLimit
+        guard excess > 0 else { return [] }
+        let coldest = coalesced.sorted { a, b in
+            a.value.window != b.value.window ? a.value.window < b.value.window : a.value.last < b.value.last
+        }.prefix(excess)
+        var due: [FSChange] = []
+        for (key, entry) in coldest {
+            if let waiting = entry.waiting { due.append(waiting) }
+            coalesced[key] = nil
+        }
+        return due
+    }
+
+    /// One timer, due when the earliest waiting change's window ends. Prunes folders whose window passed quietly.
     func scheduleFlush() {
         flushTask?.cancel()
         flushTask = nil
         guard !closed else { return }
         let now = self.now()
-        lastRelist = lastRelist.filter { path, last in deferred[path] != nil || now - last < coalesceWindow }
-        guard !deferred.isEmpty || !staleRetry.isEmpty else { return }
-        let ends = deferred.keys.compactMap { lastRelist[$0] }.map { $0 + coalesceWindow } + staleRetry.values
+        coalesced = coalesced.filter { _, entry in entry.waiting != nil || now - entry.last < entry.window }
+        let waiting = coalesced.values.filter { $0.waiting != nil }
+        guard !waiting.isEmpty || !staleRetry.isEmpty else { return }
+        let ends = waiting.map { $0.last + $0.window } + staleRetry.values
         let end = ends.min() ?? now
         let delay = max(end - now, .zero)
         flushTask = Task { [weak self] in
@@ -477,7 +561,7 @@ public actor LiveIndex {
     /// drops those, and the next open replays them from the stored ID. Taken when a batch is formed, before its apply
     /// waits for the lock, so a flush already queued ahead of it is still counted.
     private var deferredFloor: UInt64 {
-        deferred.values.map(\.id).min().map { $0 - 1 } ?? .max
+        coalesced.values.compactMap(\.waiting?.id).min().map { $0 - 1 } ?? .max
     }
 
     /// Lists again, once the lister would try them, the folders the index marked stale since the last call.
@@ -627,9 +711,17 @@ public actor LiveIndex {
                 toScan += try index.integrate(listing, rootDevice: index.rootDevice)
             }
             for folder in relists where !index.folders[Int(folder)].flags.contains(.garbage) && !rebuilt.contains(folder) {
+                #if DEBUG
+                let started = ContinuousClock.now
+                #endif
                 let listing = await listing(of: folder, in: index)
                 relistCount += 1
                 let result = try index.relist(listing)
+                #if DEBUG
+                let key = index.path(of: folder, rootPath: index.rootPath)
+                activity[key, default: FolderActivity()].relists += 1
+                activity[key]!.listTime += ContinuousClock.now - started
+                #endif
                 toScan += result.newFolders
                 // A folder left stale is reported too, so the map is redrawn with it marked.
                 if result.namesChanged || listing.outcome == .timedOut { renamed.insert(index.relativePath(of: folder)) }
@@ -708,6 +800,14 @@ public actor LiveIndex {
         self.lister = lister
     }
 
+    /// Test hook: how many folders the coalescing table may track.
+    func injectTrackedLimit(_ limit: Int) {
+        trackedLimit = limit
+    }
+
+    /// Tests only: how many folders the coalescing table tracks.
+    func trackedFolders() -> Int { coalesced.count }
+
     /// Test hook: the clock the coalescing window is measured with.
     func injectClock(_ now: @escaping @Sendable () -> ContinuousClock.Instant) {
         self.now = now
@@ -766,8 +866,7 @@ public actor LiveIndex {
         saveTask = nil
         flushTask = nil
         // Their IDs are above the stored event ID, so the next open replays them.
-        deferred = [:]
-        lastRelist = [:]
+        coalesced = [:]
         // Their folders stay marked stale in the snapshot, so the next open lists them again.
         staleRetry = [:]
         try saveLocked()
@@ -971,13 +1070,34 @@ public actor LiveIndex {
         exclusions.contains { relative == $0 || relative.hasPrefix($0 + "/") }
     }
 
+    /// The absolute path of the folder a change at `path` relists: the deepest listable folder in the index on the way
+    /// to it. `path` itself when it is outside the root or excluded, or before `open()`.
+    private func folderKey(_ path: String) -> String {
+        guard let index, let relative = relativePath(path), !isExcluded(relative) else { return path }
+        return index.path(of: listable(deepestFolder(relative, in: index), in: index), rootPath: index.rootPath)
+    }
+
+    #if DEBUG
+    /// Once a minute: the ten folders relisted most, with their raw events, distinct event paths and relist time.
+    private func logActivityIfDue() {
+        let now = ContinuousClock.now
+        guard now - activitySince >= .seconds(60) else { return }
+        let top = activity.sorted { $0.value.relists > $1.value.relists }.prefix(10)
+        for (path, a) in top where a.relists > 0 {
+            let average = a.listTime / a.relists / .milliseconds(1)
+            Self.log.info("""
+                folder activity: \(a.relists) relists, \(a.events) events, \(a.paths.count) paths, \
+                \(String(format: "%.1f", average), privacy: .public) ms each: \(path, privacy: .public)
+                """)
+        }
+        activity = [:]
+        activitySince = now
+    }
+    #endif
+
     /// The deepest folder in the index on the way to `relative`.
     private func deepestFolder(_ relative: String, in index: ScanIndex) -> FolderID {
-        var parts = relative.split(separator: "/").map(String.init)
-        while true {
-            if let folder = index.folder(atRelativePath: parts.joined(separator: "/")) { return folder }
-            parts.removeLast()
-        }
+        index.deepestFolder(onRelativePath: relative)
     }
 
     private func depth(_ folder: FolderID, _ index: ScanIndex) -> Int {

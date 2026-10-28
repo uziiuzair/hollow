@@ -251,6 +251,21 @@ public final class ScanIndex {
         return current
     }
 
+    /// The deepest folder in the index on the way to a path relative to `rootPath` ("" is the root): one walk down,
+    /// so a missing child costs one pass over its parent's subfolders.
+    public func deepestFolder(onRelativePath path: String) -> FolderID {
+        var current: FolderID = 0
+        for part in path.split(separator: "/", omittingEmptySubsequences: true) {
+            var child = folders[Int(current)].firstChildFolder
+            while child != noFolder, folderName(child) != part {
+                child = folders[Int(child)].nextSibling
+            }
+            guard child != noFolder else { return current }
+            current = child
+        }
+        return current
+    }
+
     /// The folder's path relative to the root ("" for the root).
     public func relativePath(of folder: FolderID) -> String {
         var parts: [String] = []

@@ -223,3 +223,125 @@ private func change(_ path: String, _ id: UInt64, subtree: Bool = false) -> FSCh
     #expect(await live.withIndex { $0.lastEventID } == base + 2)
     try await live.close()
 }
+
+// Task 10d: a folder is coalesced by the folder its changes relist, not by the raw event path, so changes in many
+// children (new folders that come and go in a temp folder) cost one relist per window.
+@Test func changesInManyChildrenOfOneFolderCostOneRelist() async throws {
+    let clock = ManualClock()
+    let (live, root, base, _) = try await opened(["a/f.bin": 10], window: .seconds(10), clock: clock)
+    for i in 1...20 {
+        await live.enqueue([change(root + "/a/new\(i)", base + UInt64(i))])
+        clock.advance(.milliseconds(100))
+    }
+    #expect(await live.stats().foldersRelisted == 1)
+    clock.advance(.seconds(10))
+    await live.flushDue()
+    #expect(await live.stats().foldersRelisted == 2)
+    #expect(await live.withIndex { $0.lastEventID } == base + 20)
+    try await live.close()
+}
+
+/// Changes `folder` every second for `seconds`, flushing as it goes; the clock times (from the start) of each relist.
+private func relistTimes(_ live: LiveIndex, _ folder: String, clock: ManualClock, base: UInt64,
+                         seconds: Int, from start: Int = 0) async -> [Int] {
+    var times: [Int] = []
+    var relisted = await live.stats().foldersRelisted
+    for t in start..<(start + seconds) {
+        await live.enqueue([change(folder + "/child\(t % 7)", base + UInt64(t + 1))])
+        await live.flushDue()
+        let now = await live.stats().foldersRelisted
+        if now > relisted { times.append(t) }
+        relisted = now
+        clock.advance(.seconds(1))
+    }
+    return times
+}
+
+@Test func aHotFolderBacksOffAndResetsAfterAQuietWindow() async throws {
+    let clock = ManualClock()
+    let (live, root, base, _) = try await opened(["a/f.bin": 10], window: .seconds(10), clock: clock)
+    let times = await relistTimes(live, root + "/a", clock: clock, base: base, seconds: 1000)
+    let gaps = zip(times.dropFirst(), times).map { $0 - $1 }
+    // Three relists in a row with a change each time, then the window doubles up to five minutes.
+    #expect(gaps == [10, 10, 20, 40, 80, 160, 300, 300])
+    // The change waiting out the last window lands at its end.
+    clock.advance(.seconds(300))
+    await live.flushDue()
+    #expect(await live.withIndex { $0.lastEventID } == base + 1000)
+    // One quiet window and it is back to ten seconds: the next change relists at once, the one after at +10 s.
+    clock.advance(.seconds(301))
+    let after = await relistTimes(live, root + "/a", clock: clock, base: base + 2000, seconds: 15, from: 0)
+    #expect(after == [0, 10])
+    try await live.close()
+}
+
+@Test func duringBackoffTheEventIDStaysBelowTheDeferredChange() async throws {
+    let clock = ManualClock()
+    let (live, root, base, _) = try await opened(["a/f.bin": 10, "b/g.bin": 10], window: .seconds(10), clock: clock)
+    // a relists at 0, 10, 20 and 40; its change at 41 waits for the window ending at 80.
+    _ = await relistTimes(live, root + "/a", clock: clock, base: base, seconds: 42)
+    let waiting = base + 42
+    // A quiet folder's first change still applies at once, but the stored ID stops below a's change.
+    await live.enqueue([change(root + "/b", base + 500)])
+    #expect(await live.withIndex { $0.lastEventID } == waiting - 1)
+    clock.advance(.seconds(37))
+    await live.flushDue()
+    #expect(await live.withIndex { $0.lastEventID } == waiting - 1)
+    clock.advance(.seconds(1))
+    await live.flushDue()
+    #expect(await live.withIndex { $0.lastEventID } == waiting)
+    try await live.close()
+}
+
+@Test func theBackoffTableIsBoundedAndEvictsTheColdest() async throws {
+    let clock = ManualClock()
+    let spec = Dictionary(uniqueKeysWithValues: (0..<6).map { ("f\($0)/x.bin", 10) })
+    let (live, root, base, _) = try await opened(spec, window: .seconds(10), clock: clock)
+    await live.injectTrackedLimit(4)
+    // f0 is hot (backed off to 20 s); f1…f3 had one change each, f1 the longest ago.
+    _ = await relistTimes(live, root + "/f0", clock: clock, base: base, seconds: 21)
+    for i in 1...3 {
+        await live.enqueue([change(root + "/f\(i)", base + 100 + UInt64(i))])
+        clock.advance(.milliseconds(100))
+    }
+    #expect(await live.trackedFolders() == 4)
+    // A fifth folder evicts the coldest, f1, and never the hot one.
+    await live.enqueue([change(root + "/f4", base + 200)])
+    #expect(await live.trackedFolders() == 4)
+    let before = await live.stats().foldersRelisted
+    await live.enqueue([change(root + "/f1", base + 201)])
+    #expect(await live.stats().foldersRelisted == before + 1)
+    await live.enqueue([change(root + "/f0", base + 202)])
+    #expect(await live.stats().foldersRelisted == before + 1)
+    #expect(await live.trackedFolders() <= 4)
+    try await live.close()
+}
+
+// An evicted folder's waiting change is applied, never dropped.
+@Test func evictingAFolderAppliesItsWaitingChange() async throws {
+    let clock = ManualClock()
+    let (live, root, base, _) = try await opened(["a/f.bin": 10, "b/g.bin": 10, "c/h.bin": 10], window: .seconds(10),
+                                                 clock: clock)
+    await live.injectTrackedLimit(2)
+    await live.enqueue([change(root + "/a", base + 1)])
+    await live.enqueue([change(root + "/a", base + 2)])
+    clock.advance(.milliseconds(100))
+    await live.enqueue([change(root + "/b", base + 3)])
+    #expect(await live.withIndex { $0.lastEventID } == base + 1)
+    // c evicts a, the coldest (its window began first); a's waiting change applies with it.
+    let before = await live.stats().foldersRelisted
+    await live.enqueue([change(root + "/c", base + 4)])
+    #expect(await live.stats().foldersRelisted == before + 2)
+    #expect(await live.withIndex { $0.lastEventID } == base + 4)
+    try await live.close()
+}
+
+@Test func aQuietFolderIsRelistedAtOnceWhileAnotherBacksOff() async throws {
+    let clock = ManualClock()
+    let (live, root, base, _) = try await opened(["a/f.bin": 10, "b/g.bin": 10], window: .seconds(10), clock: clock)
+    _ = await relistTimes(live, root + "/a", clock: clock, base: base, seconds: 45)
+    let before = await live.stats().foldersRelisted
+    await live.enqueue([change(root + "/b/new", base + 100)])
+    #expect(await live.stats().foldersRelisted == before + 1)
+    try await live.close()
+}
