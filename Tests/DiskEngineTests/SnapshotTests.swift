@@ -61,3 +61,44 @@ import Testing
     #expect(throws: (any Error).self) { try r.index.save(to: store) }
     #expect(try ScanIndex.load(from: store).lastEventID == 1)
 }
+
+/// 2,000 folders with 130-byte names: about 264 KB of names, five 64 KiB chunks.
+private func longNameTree() throws -> URL {
+    var spec: [String: Int] = [:]
+    for i in 0..<2_000 {
+        spec[String(format: "%04d", i) + String(repeating: "n", count: 126) + "/f"] = 1
+    }
+    return try Fixtures.tree(spec)
+}
+
+@Test func snapshotRoundTripsNamesAcrossChunks() async throws {
+    let store = try Fixtures.tempDir()
+    let r = try await DiskScanner(root: try longNameTree(), storage: store).run()
+    #expect(r.index.folderNames.byteCount >= 3 * NamePool.chunkSize)
+    try r.index.save(to: store)
+    let loaded = try ScanIndex.load(from: store)
+    #expect(loaded.folders.count == r.index.folders.count)
+    for id in 0..<r.index.folders.count {
+        #expect(loaded.folderName(FolderID(id)) == r.index.folderName(FolderID(id)))
+    }
+}
+
+@Test func snapshotWithOverlongNameIsRejected() async throws {
+    let store = try Fixtures.tempDir()
+    let r = try await DiskScanner(root: try longNameTree(), storage: store).run()
+    try r.index.save(to: store)
+    let url = store.appending(path: "index.snapshot")
+    var data = try Data(contentsOf: url)
+    // Header, rootPath (UInt32 length + bytes), empty fseventsUUID (UInt32 length), folders, then names.
+    let namesStart = 92 + 4 + r.index.rootPath.utf8.count + 4 + r.index.folders.count * MemoryLayout<FolderRecord>.stride
+    // Folder 1's length prefix: above the clamp, but still inside the name bytes.
+    let at = namesStart + Int(r.index.folders[1].nameOffset)
+    let length = UInt16(NamePool.maxNameBytes + 1)
+    data.replaceSubrange(at..<(at + 2), with: [UInt8(length & 0xFF), UInt8(length >> 8)])
+    try data.write(to: url)
+    do {
+        _ = try ScanIndex.load(from: store)
+        Issue.record("loaded a snapshot with a \(length)-byte name")
+    } catch SnapshotError.incompatible {
+    }
+}

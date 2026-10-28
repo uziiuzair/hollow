@@ -35,5 +35,16 @@ import Testing
     pool.forEachChunk { joined += $0 }
     let loaded = NamePool(bytes: joined)
     #expect(loaded.byteCount == pool.byteCount)
+    #expect(loaded.name(at: a) == filler)
     #expect(loaded.name(at: b) == "across")
+}
+
+@Test func namePoolClampsNamesToOneChunk() {
+    var pool = NamePool()
+    // The next entry starts at chunkSize - 3, so its body starts at the chunk's last byte.
+    _ = pool.append(String(repeating: "x", count: NamePool.chunkSize - 5))
+    #expect(pool.byteCount == NamePool.chunkSize - 3)
+    let long = pool.append(String(repeating: "z", count: NamePool.chunkSize + 500))
+    // Stored truncated to what fits in one chunk with its prefix, so it spans at most two.
+    #expect(pool.name(at: long) == String(repeating: "z", count: NamePool.chunkSize - 2))
 }

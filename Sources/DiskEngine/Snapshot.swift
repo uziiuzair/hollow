@@ -78,7 +78,7 @@ extension ScanIndex {
             else { throw SnapshotError.incompatible("folder \(i) out of range") }
             let offset = Int(f.nameOffset)
             let length = Int(index.folderNames.byte(at: offset)) | Int(index.folderNames.byte(at: offset + 1)) << 8
-            guard offset + 2 + length <= nameBytes else { throw SnapshotError.incompatible("folder \(i) name out of range") }
+            guard length <= NamePool.maxNameBytes, offset + 2 + length <= nameBytes else { throw SnapshotError.incompatible("folder \(i) name out of range") }
         }
         guard index.pending.allSatisfy({ $0 < count }), index.hardLinkOwners.values.allSatisfy({ $0 < count }) else {
             throw SnapshotError.incompatible("pending or hard-link owner out of range")

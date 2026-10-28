@@ -8,6 +8,9 @@
 public struct NamePool: Sendable {
     /// 64 KiB less the array header, so each chunk is exactly one 64 KiB allocation.
     static let chunkSize = 65_536 - 32
+    /// Longest stored name: with its 2-byte prefix it fits in one chunk, so an entry
+    /// spans at most two chunks. Longer names are truncated.
+    static let maxNameBytes = chunkSize - 2
 
     /// Every chunk but the last is full.
     private var chunks: [ContiguousArray<UInt8>] = []
@@ -34,7 +37,7 @@ public struct NamePool: Sendable {
         let offset = UInt32(byteCount)
         var name = name
         name.withUTF8 { utf8 in
-            let body = UnsafeBufferPointer(rebasing: utf8.prefix(Int(UInt16.max)))
+            let body = UnsafeBufferPointer(rebasing: utf8.prefix(Self.maxNameBytes))
             let length = UInt16(body.count)
             withUnsafeBytes(of: length.littleEndian) { append($0.assumingMemoryBound(to: UInt8.self)) }
             append(body)
