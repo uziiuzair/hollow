@@ -374,6 +374,9 @@ public actor LiveIndex {
             case .folders(let deltas, let moved, let renamed): indexChanged(folders: deltas, moved: moved, renamed: renamed)
             }
         } catch {
+            #if DEBUG
+            Self.log.info("apply failed: \(String(describing: error), privacy: .public)")
+            #endif
             indexChanged(folders: nil)
             // Part of the change may be in the index; drop the snapshot so a crash means a
             // full rescan, and rescan on the next apply. The event ID stays put. A vanished root saves
@@ -547,6 +550,10 @@ public actor LiveIndex {
     private func applyLocked(_ changes: [FSChange], to index: ScanIndex) async throws -> ApplyOutcome {
         applies += 1
         if needsFullRescan || changes.contains(where: \.historyLost) {
+            #if DEBUG
+            let lost = changes.filter(\.historyLost).map(\.path)
+            Self.log.info("full rescan: after a failed apply \(self.needsFullRescan), lost history at \(lost, privacy: .public)")
+            #endif
             fullRescanCount += 1
             index.resetContents(of: 0)
             try fault?()
