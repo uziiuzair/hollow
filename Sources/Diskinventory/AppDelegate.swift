@@ -93,7 +93,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        if CommandLine.arguments.contains("--watchdog") {
+            MainThreadWatchdog().start()
+        }
+
         #if DEBUG
+        // --close-map-after <s> / --reopen-map-after <s>: seconds after launch, for measuring
+        // release on close and a cold reopen without clicking (the screen may be locked).
+        for (flag, reopen) in [("--close-map-after", false), ("--reopen-map-after", true)] {
+            guard let i = CommandLine.arguments.firstIndex(of: flag), i + 1 < CommandLine.arguments.count,
+                  let seconds = Double(CommandLine.arguments[i + 1]) else { continue }
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+                guard let self else { return }
+                if reopen, let id = self.internalUUID { self.openMap(uuid: id, focus: nil) }
+                if !reopen { self.mapWindow?.close() }
+            }
+        }
         if CommandLine.arguments.contains("--show-panel") {
             DispatchQueue.main.async { [weak self] in self?.showPanel(keepOpen: true) }
         }

@@ -28,7 +28,7 @@
 14. **Index changes rebuild the map at most once per second.**
 15. **Hover-card explanations come from a small built-in table.** Plan 5's junk lenses replace it.
 16. **Offline drives in the dropdown show the cached summary's bar and rows.** The rows are not clickable, "Open map" is disabled, and the footer reads "Data from <date>".
-17. **Latency targets (the spec gives none):** the window is on screen under 100 ms after the click, and the first map frame appears under 500 ms with a warm index.
+17. **Latency targets (the spec gives none):** the window is on screen under 100 ms after the click, and the first map frame appears under 500 ms with a warm index and under 3 s with a cold one.
 18. **The toolbar row is 52 pt tall,** the height of an empty unified `NSToolbar`, so the real traffic lights sit centered in it as in the mockup. The mockup draws it at 48.
 
 ## Global Constraints
