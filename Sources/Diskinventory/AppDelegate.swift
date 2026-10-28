@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import DiskApp
 import DiskEngine
+import ServiceManagement
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -67,6 +68,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { self?.refresh() }
         }
         observeMounts()
+
+        if LoginItem.shouldRegister(bundlePath: Bundle.main.bundlePath, home: NSHomeDirectory()) {
+            do {
+                try LoginItem.registerOnFirstRun(defaults: .standard) { try SMAppService.mainApp.register() }
+            } catch {
+                // Ad-hoc signed builds may be refused; launch at login is optional.
+                NSLog("Diskinventory: could not register login item: \(error)")
+            }
+        }
 
         #if DEBUG
         if CommandLine.arguments.contains("--show-panel") {
