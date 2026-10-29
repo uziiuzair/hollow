@@ -571,8 +571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPanel(keepOpen: Bool) {
-        // hidesOnDeactivate hides the panel without onDismiss; drop what the last showing
-        // left behind so timers and monitors never stack.
+        // Drop what the last showing left behind so timers and monitors never stack.
         clearPanelTimers()
         #if DEBUG
         let clock = ContinuousClock()

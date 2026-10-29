@@ -46,7 +46,10 @@ final class DropdownPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = true
         level = .popUpMenu
-        hidesOnDeactivate = true
+        // Never hidesOnDeactivate: an accessory app that macOS doesn't count as frontmost (after a privacy prompt,
+        // for one) has the panel hidden the moment it is ordered in, so a click showed nothing. Resigning key and
+        // the outside-click monitor close it instead.
+        hidesOnDeactivate = false
         isReleasedWhenClosed = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         hosting.onSizeChange = { [weak self] in
