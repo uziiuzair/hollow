@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// What the menu bar dropdown shows for one drive.

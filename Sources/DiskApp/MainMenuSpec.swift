@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// The app's main menu as data, so its shortcuts and actions can be tested. It matters only

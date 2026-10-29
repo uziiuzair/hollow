@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 /// Append-only store of names. Each entry is a little-endian UInt16 byte length
 /// followed by the UTF-8 bytes; an offset counts bytes from the start of the pool.
 ///

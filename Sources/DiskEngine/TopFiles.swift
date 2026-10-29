@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 /// The N largest stored files, kept in a fixed-size min-heap.
 public struct TopFiles: Sendable {
     public let capacity: Int

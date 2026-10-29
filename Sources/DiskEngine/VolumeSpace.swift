@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Capacity numbers for the volume holding a URL. "Reclaimable" is space macOS can

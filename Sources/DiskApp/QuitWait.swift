@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Quitting while a move to the Trash runs: wait for the move to end before the indexes close, so every item it started

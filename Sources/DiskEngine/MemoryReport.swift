@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Darwin
 
 /// Where an index's RAM goes, plus the process footprint Activity Monitor shows.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Turns the paths of an FSEvents device stream, which are relative to the device's mount point,

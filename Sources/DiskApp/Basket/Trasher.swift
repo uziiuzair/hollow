@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Moves one item to the Trash. The app's only implementation lives in the `Hollow` target; tests use a fixture bin.

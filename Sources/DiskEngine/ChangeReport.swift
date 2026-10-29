@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 /// One item that grew (positive) or shrank (negative).
 public struct Change: Codable, Sendable, Equatable {
     public var path: String

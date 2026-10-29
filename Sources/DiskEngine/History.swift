@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Sizes of the big items in an index, keyed by path relative to the root ("" is the

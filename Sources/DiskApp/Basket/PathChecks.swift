@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import os
 
 /// Tests only: counts the path comparisons (a prefix test, or a set lookup of one ancestor) the basket and the review

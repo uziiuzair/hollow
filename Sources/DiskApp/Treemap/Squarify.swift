@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import CoreGraphics
 
 /// Squarified treemap tiling: Bruls, Huizing, van Wijk (2000).

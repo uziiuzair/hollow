@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import CoreGraphics
 
 /// Geometry of the zoom transition. Drawing maps a point as `p * scale + offset`.

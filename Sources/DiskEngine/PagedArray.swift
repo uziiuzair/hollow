@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 /// An append-only array stored in fixed pages of 65,536 elements. Growing never
 /// copies existing elements, so peak memory stays close to the live size.
 public struct PagedArray<Element>: RandomAccessCollection, MutableCollection {

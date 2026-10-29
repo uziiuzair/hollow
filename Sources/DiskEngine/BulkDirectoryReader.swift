@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Darwin
 
 public enum EntryKind: UInt8, Sendable {

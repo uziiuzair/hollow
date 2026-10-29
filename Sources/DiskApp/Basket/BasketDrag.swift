@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import CoreGraphics
 
 /// A drag of one map block or side-list row toward the basket bar, tracked by the window itself (no pasteboard, so it can

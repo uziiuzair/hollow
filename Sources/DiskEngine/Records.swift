@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 public typealias FolderID = UInt32
 public typealias FileIndex = UInt32
 

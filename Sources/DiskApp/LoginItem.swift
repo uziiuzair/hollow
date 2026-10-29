@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Where "did we register" lives. `UserDefaults` in the app, an in-memory store in tests.

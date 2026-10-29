@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// One folder per test process, `<tmp>/HollowTests/DiskAppTests-<pid>-<UUID>/`, holding

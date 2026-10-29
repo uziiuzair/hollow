@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Stored files (24-byte records) and their names, both on disk and memory-mapped.
