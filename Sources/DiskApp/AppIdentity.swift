@@ -1,8 +1,8 @@
 import Foundation
 
 public enum AppIdentity {
-    public static let name = "Diskinventory"
-    public static let bundleID = "com.ooozzy.diskinventory"
+    public static let name = "Hollow"
+    public static let bundleID = "com.uziiuzair.hollow"
 
     /// `~/Library/Application Support/<name>`, created if missing.
     public static func storeBase() throws -> URL {

@@ -92,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try? FileManager.default.removeItem(at: imageStoreBase)
             syncVolumes()
         } catch {
-            NSLog("Diskinventory: cannot open store: \(error)")
+            NSLog("Hollow: cannot open store: \(error)")
         }
         // Emits the current value first (a no-op after the controllers were created with it), then every change.
         settingsSubscription = settingsStore.$settings.map { $0.normalized() }.removeDuplicates()
@@ -122,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try LoginItem.registerOnFirstRun(defaults: UserDefaults.standard) { try SMAppService.mainApp.register() }
             } catch {
                 // Ad-hoc signed builds may be refused; launch at login is optional.
-                NSLog("Diskinventory: could not register login item: \(error)")
+                NSLog("Hollow: could not register login item: \(error)")
             }
         }
 
@@ -608,8 +608,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { self?.rebuild() }
         }
         #if DEBUG
-        NSLog("Diskinventory panel window \(p.windowNumber) frame \(p.frame)")
-        NSLog("Diskinventory showPanel main thread: sync+model \(dataReady), total \(clock.now - started)")
+        NSLog("Hollow panel window \(p.windowNumber) frame \(p.frame)")
+        NSLog("Hollow showPanel main thread: sync+model \(dataReady), total \(clock.now - started)")
         #endif
     }
 
@@ -721,7 +721,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let debugBasketVolume = "/Volumes/DITrash"
 
     /// A plain file only the check script creates at the image's root.
-    private static let debugBasketMarker = ".diskinventory-test-volume"
+    private static let debugBasketMarker = ".hollow-test-volume"
 
     /// True when `hdiutil info` lists a disk image mounted at exactly `mountPoint`.
     nonisolated private static func isMountedDiskImage(at mountPoint: String) -> Bool {
@@ -943,7 +943,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let ms = (clock.now - started) / .milliseconds(1)
         mapLog.info("map window shown in \(Int(ms)) ms")
         #if DEBUG
-        if let w = mapWindow?.window { NSLog("Diskinventory map window \(w.windowNumber) frame \(w.frame)") }
+        if let w = mapWindow?.window { NSLog("Hollow map window \(w.windowNumber) frame \(w.frame)") }
         #endif
         return true
     }

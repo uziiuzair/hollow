@@ -99,7 +99,7 @@ public struct ApplyStats: Equatable, Sendable {
 /// changed, saves on a debounce, and compacts when garbage builds up.
 public actor LiveIndex {
     #if DEBUG
-    private static let log = Logger(subsystem: "com.ooozzy.diskinventory", category: "index")
+    private static let log = Logger(subsystem: "com.uziiuzair.hollow", category: "index")
     #endif
     public let volumeRoot: URL
     public let store: URL

@@ -1,10 +1,10 @@
 #!/bin/bash
 # Usage: scripts/make-app.sh [debug|release]
-# Builds the Diskinventory product and wraps it in .build/Diskinventory.app.
+# Builds the Hollow product and wraps it in .build/Hollow.app.
 set -euo pipefail
 
-NAME="Diskinventory"
-BUNDLE_ID="com.ooozzy.diskinventory"
+NAME="Hollow"
+BUNDLE_ID="com.uziiuzair.hollow"
 CONFIG="${1:-debug}"
 case "$CONFIG" in debug|release) ;; *) echo "usage: $0 [debug|release]" >&2; exit 2 ;; esac
 
@@ -32,12 +32,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
-    <key>NSHumanReadableCopyright</key><string>© 2026 ooozzy</string>
+    <key>NSHumanReadableCopyright</key><string>© 2026 Uzair Hayat</string>
     <key>LSUIElement</key><true/>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict>
 </plist>
 PLIST
 
-codesign --force --sign - --deep --options runtime --entitlements scripts/Diskinventory.entitlements "$APP"
+codesign --force --sign - --deep --options runtime --entitlements scripts/Hollow.entitlements "$APP"
 echo "Built $APP"

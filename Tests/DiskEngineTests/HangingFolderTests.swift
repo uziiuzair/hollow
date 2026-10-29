@@ -299,7 +299,7 @@ private func cloudRoot(_ real: String, _ hang: Hang) -> @Sendable (String, Folde
 
 // Fix round 1: other apps' containers are never opened without Full Disk Access.
 
-private let ownID = "com.ooozzy.diskinventory"
+private let ownID = "com.uziiuzair.hollow"
 
 private func containerIndex(fullDiskAccess: Bool, hang: Hang) async throws -> (LiveIndex, String) {
     let root = try Fixtures.tree(["Library/Containers/com.other.app/Data/f.bin": 10,

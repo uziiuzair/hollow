@@ -37,11 +37,11 @@ public enum LoginItem {
     public static func toggle(status: LoginItemStatus, installed: Bool) -> LoginToggle {
         let isOn = status == .enabled
         if !installed {
-            return LoginToggle(isOn: isOn, isEnabled: false, note: "Move Diskinventory to Applications to launch it at login.")
+            return LoginToggle(isOn: isOn, isEnabled: false, note: "Move Hollow to Applications to launch it at login.")
         }
         if status == .requiresApproval {
             return LoginToggle(isOn: false, isEnabled: true,
-                               note: "Allow Diskinventory in System Settings \u{203A} General \u{203A} Login Items.")
+                               note: "Allow Hollow in System Settings \u{203A} General \u{203A} Login Items.")
         }
         return LoginToggle(isOn: isOn, isEnabled: true, note: nil)
     }

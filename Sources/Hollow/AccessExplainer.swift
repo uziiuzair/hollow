@@ -44,10 +44,10 @@ struct AccessExplainerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Let Diskinventory see the whole disk").font(.headline)
-            Text("macOS keeps Mail, Messages, Safari and some app data private until you allow Full Disk Access. Without it, Diskinventory still works, but those folders show as \"Can't read\" and their space counts as Other.")
+            Text("Let Hollow see the whole disk").font(.headline)
+            Text("macOS keeps Mail, Messages, Safari and some app data private until you allow Full Disk Access. Without it, Hollow still works, but those folders show as \"Can't read\" and their space counts as Other.")
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Open System Settings, turn on Diskinventory under Full Disk Access, then reopen the app.")
+            Text("Open System Settings, turn on Hollow under Full Disk Access, then reopen the app.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {

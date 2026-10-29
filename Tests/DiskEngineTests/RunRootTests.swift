@@ -5,7 +5,7 @@ import Testing
     let dir = try Fixtures.tempDir()
     let root = RunRoot.url.path(percentEncoded: false).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     #expect(dir.path.hasPrefix("/" + root + "/"))
-    #expect(root.contains("/DiskinventoryTests/DiskEngineTests-\(getpid())-"))
+    #expect(root.contains("/HollowTests/DiskEngineTests-\(getpid())-"))
     #expect(FileManager.default.fileExists(atPath: dir.path))
 }
 

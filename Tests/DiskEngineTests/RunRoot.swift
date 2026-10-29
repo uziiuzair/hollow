@@ -1,14 +1,14 @@
 import Foundation
 
-/// One folder per test process, `<tmp>/DiskinventoryTests/DiskEngineTests-<pid>-<UUID>/`, holding
+/// One folder per test process, `<tmp>/HollowTests/DiskEngineTests-<pid>-<UUID>/`, holding
 /// every fixture. It is removed when the process exits; roots left by crashed runs
 /// (pid no longer alive) are removed on first use. Nothing outside
-/// `<tmp>/DiskinventoryTests/` is ever deleted.
+/// `<tmp>/HollowTests/` is ever deleted.
 enum RunRoot {
     static let target = "DiskEngineTests"
 
     static var base: URL {
-        FileManager.default.temporaryDirectory.appending(path: "DiskinventoryTests", directoryHint: .isDirectory)
+        FileManager.default.temporaryDirectory.appending(path: "HollowTests", directoryHint: .isDirectory)
     }
 
     /// Created, stale-swept and exit-hooked on first access only.

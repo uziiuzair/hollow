@@ -144,13 +144,13 @@ public struct LensRules: Sendable {
         if url == nil { url = Bundle.module.url(forResource: "lenses", withExtension: "json") }
         #endif
         guard let url, let data = try? Data(contentsOf: url) else {
-            NSLog("Diskinventory: lenses.json is missing; the junk lens is empty")
+            NSLog("Hollow: lenses.json is missing; the junk lens is empty")
             return LensRules(rules: [])
         }
         do {
             return try LensRules(json: data)
         } catch {
-            NSLog("Diskinventory: lenses.json is unreadable (\(error)); the junk lens is empty")
+            NSLog("Hollow: lenses.json is unreadable (\(error)); the junk lens is empty")
             return LensRules(rules: [])
         }
     }()

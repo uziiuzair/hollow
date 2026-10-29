@@ -127,7 +127,7 @@ public final class DirectoryLister: @unchecked Sendable {
         let roots = ConsentRoots(home: NSHomeDirectory())
         return DirectoryLister(consentRoot: { roots.root(of: $0) })
     }()
-    private static let log = Logger(subsystem: "com.ooozzy.diskinventory", category: "lister")
+    private static let log = Logger(subsystem: "com.uziiuzair.hollow", category: "lister")
 
     public let threads: Int
     public let timeout: Duration

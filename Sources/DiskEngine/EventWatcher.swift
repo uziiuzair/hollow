@@ -39,7 +39,7 @@ public struct FSChange: Sendable, Equatable {
 /// batch of changes per callback.
 public final class EventWatcher: @unchecked Sendable {
     #if DEBUG
-    fileprivate static let log = Logger(subsystem: "com.ooozzy.diskinventory", category: "index")
+    fileprivate static let log = Logger(subsystem: "com.uziiuzair.hollow", category: "index")
     #endif
     public let changes: AsyncStream<[FSChange]>
     private let sink: AsyncStream<[FSChange]>.Continuation

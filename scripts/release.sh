@@ -1,6 +1,6 @@
 #!/bin/bash
 # Usage: DEVELOPER_ID_APPLICATION=... TEAM_ID=... NOTARY_PROFILE=... [VERSION=x.y] scripts/release.sh
-# Builds, signs with Developer ID, notarizes, staples and zips Diskinventory.
+# Builds, signs with Developer ID, notarizes, staples and zips Hollow.
 # DRY_RUN=1 prints the signing and notarization commands (steps 4 to 8) instead of running them.
 set -euo pipefail
 
@@ -27,9 +27,9 @@ case "$DEVELOPER_ID_APPLICATION" in
     *) echo "release.sh: the signing identity is not for team $TEAM_ID" >&2; exit 64 ;;
 esac
 
-APP=".build/Diskinventory.app"
-ZIP=".build/Diskinventory-$VERSION.zip"
-ENTITLEMENTS="scripts/Diskinventory.entitlements"
+APP=".build/Hollow.app"
+ZIP=".build/Hollow-$VERSION.zip"
+ENTITLEMENTS="scripts/Hollow.entitlements"
 
 # run: execute a command, or print it with "+ " under DRY_RUN=1.
 run() {

@@ -93,7 +93,7 @@ struct SettingsView: View {
         do {
             if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         } catch {
-            NSLog("Diskinventory: could not change the login item: \(error)")
+            NSLog("Hollow: could not change the login item: \(error)")
         }
         login = Self.loginToggle()
     }

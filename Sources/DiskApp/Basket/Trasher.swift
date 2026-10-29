@@ -1,6 +1,6 @@
 import Foundation
 
-/// Moves one item to the Trash. The app's only implementation lives in the `Diskinventory` target; tests use a fixture bin.
+/// Moves one item to the Trash. The app's only implementation lives in the `Hollow` target; tests use a fixture bin.
 public protocol TrashBackend: Sendable {
     func trash(_ url: URL) throws
 }
