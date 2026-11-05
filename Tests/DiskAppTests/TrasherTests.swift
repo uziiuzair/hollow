@@ -15,7 +15,7 @@ func trash(_ items: [BasketItem], in root: URL, protected: [LensHit] = []) async
     let root = try Fixtures.tree(["a/big.bin": 3_000_000, "b/keep.bin": 2_000_000])
     let (out, bin) = try await trash([item("a/big.bin", 2_500_000_000)], in: root)
     #expect(out.moved == ["a/big.bin"] && out.failures.isEmpty && out.freed == 2_500_000_000)
-    #expect(out.title == "Freed 2.5 GB" && out.detail == "It stays in the Trash until you empty it." && out.failureHeader == nil)
+    #expect(out.title == "Moved 2.5 GB to the Trash" && out.detail == "Empty the Trash to get the space back." && out.failureHeader == nil)
     #expect(!FileManager.default.fileExists(atPath: root.appending(path: "a/big.bin").path))
     #expect(FileManager.default.fileExists(atPath: root.appending(path: "b/keep.bin").path))
     #expect(try FileManager.default.contentsOfDirectory(atPath: bin.path).count == 1)
@@ -172,7 +172,7 @@ struct RootRemovingTrash: TrashBackend {
     #expect(gone.moved.isEmpty && gone.freed == 0 && gone.cleared.isEmpty && gone.detail == nil)
     #expect(gone.failureHeader == "1 item wasn't moved." && gone.failureLines == ["a.bin: the drive was disconnected."])
     let mixed = TrashOutcome(moved: ["x"], failures: [.init(path: "o", name: "o", reason: .outsideDrive)], freed: 12_000_000_000)
-    #expect(mixed.title == "Freed 12 GB" && mixed.failureLines == ["o: no longer on this drive."])
+    #expect(mixed.title == "Moved 12 GB to the Trash" && mixed.failureLines == ["o: no longer on this drive."])
 }
 
 @Test func aSymlinkInTheParentChainCannotDodgeTheChecks() async throws {

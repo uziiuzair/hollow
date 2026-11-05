@@ -39,9 +39,9 @@ public struct TrashOutcome: Equatable, Sendable {
         Set(moved).union(failures.filter { $0.reason == .alreadyGone }.map(\.path))
     }
 
-    public var title: String { moved.isEmpty ? "Nothing moved to the Trash" : "Freed " + Format.gb(freed) }
+    public var title: String { moved.isEmpty ? "Nothing moved to the Trash" : "Moved " + Format.gb(freed) + " to the Trash" }
 
-    public var detail: String? { moved.isEmpty ? nil : "It stays in the Trash until you empty it." }
+    public var detail: String? { moved.isEmpty ? nil : "Empty the Trash to get the space back." }
 
     public var failureHeader: String? {
         switch failures.count {

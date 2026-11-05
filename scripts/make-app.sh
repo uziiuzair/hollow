@@ -11,8 +11,11 @@ case "$CONFIG" in debug|release) ;; *) echo "usage: $0 [debug|release]" >&2; exi
 cd "$(dirname "$0")/.."
 VERSION="${VERSION:-0.1}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD)}"
-swift build -c "$CONFIG" --product "$NAME"
-BIN="$(swift build -c "$CONFIG" --show-bin-path)/$NAME"
+# Release builds run on both Apple Silicon and Intel; debug builds only for this Mac.
+ARCHS=()
+if [ "$CONFIG" = release ]; then ARCHS=(--arch arm64 --arch x86_64); fi
+swift build -c "$CONFIG" ${ARCHS[@]+"${ARCHS[@]}"} --product "$NAME"
+BIN="$(swift build -c "$CONFIG" ${ARCHS[@]+"${ARCHS[@]}"} --show-bin-path)/$NAME"
 
 APP=".build/$NAME.app"
 rm -rf "$APP"
