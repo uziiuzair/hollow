@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hollow: trace down where your disk space goes</title>
+<meta name="description" content="Hollow is a free, open source menu bar app for macOS. A full-window treemap shows where your space goes, the dropdown shows what changed, and nothing moves to the Trash until you review it.">
+<link rel="canonical" href="https://uziiuzair.com/software/hollow">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f7f7">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#131516">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Hollow">
+<meta property="og:title" content="Hollow: trace down where your disk space goes">
+<meta property="og:description" content="A free, open source menu bar app for macOS. A full-window treemap of your disk, what changed this week, and cleanup you review first.">
+<meta property="og:url" content="https://uziiuzair.com/software/hollow">
+<meta property="og:image" content="https://uziiuzair.com/software/hollow/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The Hollow window, a treemap of a disk with blocks coloured by kind of file.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Hollow: trace down where your disk space goes">
+<meta name="twitter:description" content="A free, open source menu bar app for macOS. A full-window treemap of your disk, what changed this week, and cleanup you review first.">
+<meta name="twitter:image" content="https://uziiuzair.com/software/hollow/og.jpg">
+<meta name="twitter:image:alt" content="The Hollow window, a treemap of a disk with blocks coloured by kind of file.">
+
+<link rel="icon" href="/software/hollow/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/software/hollow/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/software/hollow/apple-touch-icon.png">
+<link rel="preload" href="/software/hollow/fonts/instrument-sans-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/software/hollow/site.css">
+</head>
+<body>
+
+<header class="top wrap">
+  <span class="brand">
+    <svg class="ring" viewBox="0 0 64 64" width="20" height="20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="12.5"><circle cx="32" cy="32" r="25.75" opacity=".3"/><path d="M32 6.25a25.75 25.75 0 1 1-17.77 44.38"/></g></svg>
+    Hollow
+  </span>
+  <a class="quiet" href="https://uziiuzair.com">by Uzair Hayat</a>
+</header>
+
+<main>
+
+<section class="hero wrap">
+  <h1>Trace down where your space goes.</h1>
+  <div class="hero-row">
+    <p class="lede">Hollow is a menu bar app for your Mac. It draws your whole disk as a map, so the big stuff is easy to spot, and it tells you what changed this week.</p>
+    <div class="get">
+      <div class="actions">
+        <a class="button" href="https://github.com/uziiuzair/hollow/releases/download/v0.1/Hollow-0.1.zip">Download for Mac</a>
+        <a class="plain" href="https://github.com/uziiuzair/hollow">Source on GitHub</a>
+      </div>
+      <p class="fine">Version 0.1, 2.5 MB. macOS 14 or later. Free.</p>
+    </div>
+  </div>
+  <figure class="shot">
+    <picture>
+      <source media="(max-width: 600px) and (prefers-color-scheme: dark)" type="image/webp" width="1668" height="1520" srcset="/software/hollow/map-dark-phone.webp">
+      <source media="(max-width: 600px)" type="image/webp" width="1668" height="1520" srcset="/software/hollow/map-light-phone.webp">
+      <source media="(prefers-color-scheme: dark)" type="image/webp" sizes="(min-width: 1440px) 1360px, calc(100vw - 32px)" srcset="/software/hollow/map-dark-1200.webp 1200w, /software/hollow/map-dark-2400.webp 2400w">
+      <img class="window" src="/software/hollow/map-light-2400.webp" srcset="/software/hollow/map-light-1200.webp 1200w, /software/hollow/map-light-2400.webp 2400w" sizes="(min-width: 1440px) 1360px, calc(100vw - 32px)" width="2400" height="1520" fetchpriority="high" alt="The Hollow window showing a home folder as a treemap. Library, Movies, code, Pictures, Downloads, Documents, Music and Applications are blocks sized by how much space they take, coloured by kind of file, from Library at 5.1 GB down to Applications at 0.5 GB.">
+    </picture>
+    <figcaption>The bigger the block, the more space it takes. The folders and files in these pictures are made up.</figcaption>
+  </figure>
+</section>
+
+<section class="split wrap">
+  <h2 class="split-a">Why I built it</h2>
+  <div class="split-b prose">
+    <p>One app on my Mac had left 33 GB of crash reports in a folder I had never opened. About 180,000 of them. Nobody goes looking for that. You need something that puts it in front of you.</p>
+    <p>I wanted a faster alternative to Disk Inventory X, one that never freezes. So I built Hollow.</p>
+  </div>
+</section>
+
+<section class="split wrap">
+  <div class="split-b prose">
+    <h2>Double-click to go in</h2>
+    <p>The window is a treemap on the left and a side list on the right. Double-click a block to open that folder. Right-click for Show in Finder and Move to Trash.</p>
+    <p>It works on the internal disk and on external drives.</p>
+  </div>
+  <figure class="split-a shot">
+    <img class="window light-only" loading="lazy" src="/software/hollow/map-zoomed-light-2400.webp" srcset="/software/hollow/map-zoomed-light-1200.webp 1200w, /software/hollow/map-zoomed-light-2400.webp 2400w" sizes="(min-width: 900px) 58vw, calc(100vw - 32px)" width="2400" height="1520" alt="The same window one level down, inside Library. Developer, Containers, Caches and Application Support fill the map, with a 1.3 GB Docker.raw file as a large teal block.">
+  </figure>
+</section>
+
+<section class="split wrap">
+  <div class="split-b prose">
+    <h2>It lives in the menu bar</h2>
+    <p>A ring and the free-space number. No Dock icon.</p>
+    <p>Click it and the dropdown shows what changed on your disk: today, over 7 days, or over 30 days. So when the number drops, you can see why.</p>
+  </div>
+  <figure class="split-a panel">
+    <div class="menubar" aria-hidden="true">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="/software/hollow/status-icon-dark.png">
+        <img src="/software/hollow/status-icon-light.png" width="16" height="16" alt="">
+      </picture>
+      <span>9.4 GB</span>
+    </div>
+    <picture>
+      <source media="(prefers-color-scheme: dark)" type="image/webp" srcset="/software/hollow/dropdown-dark.webp">
+      <img class="dropdown" loading="lazy" src="/software/hollow/dropdown-light.webp" width="340" height="435" alt="An example of the Hollow dropdown with sample data. 9.4 GB free of 27 GB, a bar split by kind of file, and a What changed list set to 7 days, with rows such as Harbor Walk.mov up 1.3 GB and com.example.browser down 0.6 GB.">
+    </picture>
+  </figure>
+</section>
+
+<section class="split wrap">
+  <div class="split-b prose">
+    <h2>Nothing moves until you say so</h2>
+    <p>Cleanup suggestions collect into a basket, and you go through them on a review sheet. Nothing is deleted outright. Items go to the Trash and you can put them back.</p>
+    <p>Hollow never empties the Trash. It tells you to empty it when you want the space back.</p>
+    <p>System folders are refused. Time Machine backups and system tools’ folders are not suggested.</p>
+  </div>
+  <figure class="split-a panel">
+    <img class="sheet light-only" loading="lazy" src="/software/hollow/review-light.webp" width="560" height="509" alt="The review sheet, titled Review before moving to Trash. It lists DerivedData, two node_modules folders and an app cache, ticked, each with its size and a note on what it is. A Docker disk is listed unticked with a note to reclaim space in Docker’s settings. The button reads Move 4 items to Trash.">
+  </figure>
+</section>
+
+<section class="split wrap">
+  <h2 class="split-a">It keeps up and it doesn’t hang</h2>
+  <div class="split-b prose">
+    <p>Hollow reads the disk once, then follows changes through FSEvents. The numbers stay current without rescanning, and a big new file shows up within seconds.</p>
+    <p>A folder that hangs, like a stuck cloud folder or an unanswered privacy prompt, gets skipped and retried. The app doesn’t freeze waiting for it. And it never triggers a cloud download.</p>
+    <p>Measured on my Mac, in an optimized build: about 1% CPU at idle with the map window open, and 1.4 s for a cleanup scan of a disk with 1.95 million folders.</p>
+  </div>
+</section>
+
+<section class="split wrap">
+  <h2 class="split-a">It stays on your Mac</h2>
+  <div class="split-b prose">
+    <p>Hollow makes no network connections. I searched the source to check, and you can read it yourself.</p>
+    <p>It asks for Full Disk Access so it can measure Mail, Messages, Safari and some app data. It works without it. Those folders then show as unreadable.</p>
+  </div>
+</section>
+
+<section class="split wrap" id="get">
+  <div class="split-a">
+    <h2>Get Hollow</h2>
+    <div class="actions">
+      <a class="button" href="https://github.com/uziiuzair/hollow/releases/download/v0.1/Hollow-0.1.zip">Download for Mac</a>
+      <a class="plain" href="https://github.com/uziiuzair/hollow">Source on GitHub</a>
+    </div>
+    <p class="install">Unzip it, move Hollow to Applications, then look in the menu bar.</p>
+  </div>
+  <dl class="split-b list">
+    <div><dt>Version</dt><dd>0.1</dd></div>
+    <div><dt>Download</dt><dd>2.5 MB</dd></div>
+    <div><dt>Needs</dt><dd>macOS 14 or later</dd></div>
+    <div><dt>Runs on</dt><dd>Apple Silicon and Intel</dd></div>
+    <div><dt>Signed</dt><dd>Developer ID, notarized by Apple</dd></div>
+    <div><dt>Price</dt><dd>Free</dd></div>
+    <div><dt>License</dt><dd>Open source, GPLv3</dd></div>
+  </dl>
+</section>
+
+</main>
+
+<footer class="bottom wrap">
+  <a class="quiet" href="https://uziiuzair.com">by Uzair Hayat</a>
+  <p>This page has no trackers and loads nothing from other sites.</p>
+</footer>
+
+</body>
+</html>

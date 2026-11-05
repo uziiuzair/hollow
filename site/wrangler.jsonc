@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hollow",
+  "compatibility_date": "2026-11-03",
+  // Static assets only, no Worker code. Requests arrive with their full path, so the files sit at
+  // matching paths under public/: public/software/hollow.html serves /software/hollow.
+  "assets": {
+    "directory": "./public",
+    "html_handling": "auto-trailing-slash"
+  },
+  // Served under a path of the main site, which keeps everything else: the more specific route wins.
+  // One trailing wildcard, because an exact-path route does not match the same path with a query string.
+  "routes": [{ "pattern": "uziiuzair.com/software/hollow*", "zone_name": "uziiuzair.com" }],
+  "workers_dev": false,
+  "preview_urls": false
+}

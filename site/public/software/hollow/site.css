@@ -1,0 +1,238 @@
+/* Instrument Sans, SIL Open Font License 1.1, see fonts/OFL.txt */
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("/software/hollow/fonts/instrument-sans-latin-wght.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #f6f7f7;
+  --panel: #eaecec;
+  --strip: #dfe2e2;
+  --ink: #15191a;
+  --muted: #586163;
+  --line: #d9dddd;
+  /* Hollow's teal is #0fa39b. White on it is too faint for button text, so light mode takes it darker. */
+  --accent: #0b7f78;
+  --on-accent: #ffffff;
+  --link: #0b7570;
+  --edge: rgb(0 0 0 / 0.22);
+
+  --gutter: 40px;
+  --gap: 72px;
+  --section: 128px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131516;
+    --panel: #1c1f20;
+    --strip: #272b2c;
+    --ink: #eceeee;
+    --muted: #9ca4a5;
+    --line: #2b2f30;
+    --accent: #0fa39b;
+    --on-accent: #04211f;
+    --link: #3cc4bb;
+    --edge: rgb(255 255 255 / 0.2);
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 17px/1.55 "Instrument Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+img { display: block; max-width: 100%; height: auto; }
+figure, dl, dd { margin: 0; }
+
+.wrap {
+  width: 100%;
+  max-width: calc(1360px + 2 * var(--gutter));
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+a { color: var(--link); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 4px; }
+
+/* Top and bottom */
+
+.top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-block: 22px;
+}
+.brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 600; letter-spacing: -0.01em; }
+.ring { flex: none; }
+.quiet { color: var(--muted); text-decoration: none; font-size: 15px; }
+.quiet:hover { color: var(--ink); text-decoration: underline; }
+
+.bottom {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 32px;
+  margin-top: var(--section);
+  padding-block: 28px 40px;
+  color: var(--muted);
+  font-size: 15px;
+}
+.bottom p { margin: 0; }
+
+/* Hero: one line of type, then the map gets the room */
+
+.hero { padding-top: 40px; }
+
+h1 {
+  margin: 0;
+  font-size: clamp(2.5rem, 5.75vw, 5.25rem);
+  line-height: 1.02;
+  font-weight: 600;
+  letter-spacing: -0.034em;
+  text-wrap: balance;
+}
+
+.hero-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 24px 64px;
+  margin-top: 28px;
+}
+
+.lede { margin: 0; max-width: 37em; font-size: 20px; line-height: 1.45; color: var(--muted); }
+
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; }
+
+.button {
+  display: inline-block;
+  padding: 11px 20px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+.button:hover { background: color-mix(in srgb, var(--accent) 88%, var(--ink)); }
+
+.fine { margin: 10px 0 0; font-size: 15px; letter-spacing: 0.01em; color: var(--muted); }
+
+.shot { margin: 0; }
+.hero .shot { margin-top: 44px; }
+
+/* A hairline that follows the window's own rounded corners. Flat, no soft shadow. */
+.window { width: 100%; filter: drop-shadow(0 0 0.75px var(--edge)); }
+
+figcaption { margin-top: 14px; color: var(--muted); font-size: 15px; }
+
+/* Sections borrow the app's window: the picture on the left, the list on the right */
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  column-gap: var(--gap);
+  align-items: start;
+  margin-top: var(--section);
+}
+.split-a { grid-column: 1; grid-row: 1; }
+.split-b { grid-column: 2; grid-row: 1; }
+
+h2 {
+  margin: 0;
+  font-size: clamp(1.625rem, 2.6vw, 2.25rem);
+  line-height: 1.12;
+  font-weight: 600;
+  letter-spacing: -0.024em;
+  text-wrap: balance;
+}
+
+.prose { max-width: 34em; }
+.prose h2 { margin-bottom: 18px; }
+.prose p { margin: 0 0 1em; }
+.prose p:last-child { margin-bottom: 0; }
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: hidden;
+  padding-bottom: 48px;
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+/* A plain strip standing in for the menu bar, so the dropdown has something to hang from */
+.menubar {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 16px;
+  background: var(--strip);
+  font-size: 14px;
+  font-weight: 500;
+}
+.dropdown { margin-top: 8px; filter: drop-shadow(0 0 0.75px var(--edge)); }
+
+.sheet { margin-top: 48px; width: calc(100% - 96px); max-width: 560px; border-radius: 14px; }
+
+/* These two only exist as light captures, so they come down a little on a dark page */
+@media (prefers-color-scheme: dark) {
+  .light-only { filter: brightness(0.86); }
+}
+
+/* The spec list, drawn like Hollow's side list */
+
+#get h2 { margin-bottom: 24px; }
+.install { margin: 18px 0 0; max-width: 30em; color: var(--muted); }
+
+.list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding-block: 11px;
+  border-bottom: 1px solid var(--line);
+}
+.list div:first-child { padding-top: 0; }
+.list dt { color: var(--muted); }
+.list dd { text-align: right; letter-spacing: 0.005em; }
+
+/* Phones and small windows: one column, words before pictures */
+
+@media (max-width: 900px) {
+  :root { --gutter: 16px; --section: 80px; }
+
+  .split { display: block; }
+  .split > * + * { margin-top: 24px; }
+  .hero { padding-top: 16px; }
+  .hero .shot { margin-top: 32px; }
+  .lede { font-size: 18px; }
+  .panel { padding-bottom: 28px; }
+  .sheet { margin-top: 24px; width: calc(100% - 24px); }
+  h2 + .prose { margin-top: 16px; }
+}
+
+/* Phones get the map alone, cropped from the window, so the blocks stay big enough to read */
+@media (max-width: 600px) {
+  .hero .window { border-radius: 7px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .button, .quiet { transition: background-color 120ms ease, color 120ms ease; }
+}
