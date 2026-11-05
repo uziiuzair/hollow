@@ -1,3 +1,5 @@
 .superpowers/
 .remember/
 .build/
+.DS_Store
+.claude/
